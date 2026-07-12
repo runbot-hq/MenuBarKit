@@ -114,10 +114,31 @@ public extension View {
         overlayGate: MBKOverlayGate,
         @ViewBuilder content: @escaping () -> SheetContent
     ) -> some View {
-        modifier(MBKAnchoredSheetModifier(
+        modifier(MBKAnchoredSheetModifier(isPresented: isPresented, overlayGate: overlayGate, sheetContent: content))
+    }
+
+    /// Item-binding overload of `mbkSheet`. Presents the sheet when `item` is non-nil
+    /// and dismisses it when `item` becomes nil. Passes the unwrapped item to the content closure.
+    ///
+    /// Internally converts the optional binding to a `Bool` binding so the underlying
+    /// `MBKAnchoredSheetModifier` can manage the overlay gate and window anchoring.
+    func mbkSheet<Item, SheetContent: View>(
+        item: Binding<Item?>,
+        overlayGate: MBKOverlayGate,
+        @ViewBuilder content: @escaping (Item) -> SheetContent
+    ) -> some View {
+        let isPresented = Binding<Bool>(
+            get: { item.wrappedValue != nil },
+            set: { if !$0 { item.wrappedValue = nil } }
+        )
+        return modifier(MBKAnchoredSheetModifier(
             isPresented: isPresented,
             overlayGate: overlayGate,
-            sheetContent: content
+            sheetContent: {
+                if let value = item.wrappedValue {
+                    content(value)
+                }
+            }
         ))
     }
 }
