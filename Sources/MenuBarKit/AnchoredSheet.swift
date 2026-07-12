@@ -101,6 +101,16 @@
 //   The DispatchQueue.main.async mixes GCD with Swift concurrency and bypasses
 //   actor checking. It must be replaced with the NSWindow.didBecomeKeyNotification
 //   approach above before this code enters the main app.
+//
+// WHY Item: Identifiable & Equatable (not just Identifiable):
+//   onChange(of:) requires the observed value to conform to Equatable so SwiftUI
+//   can diff old vs new values. Optional<Item> conditionally conforms to Equatable
+//   only when Item itself is Equatable. Without this constraint the compiler
+//   rejects .onChange(of: item) with "requires that 'Item' conform to 'Equatable'".
+//   SwiftUI's own .sheet(item:) only requires Identifiable — but that modifier
+//   does not need to diff values, it only needs to know whether item is nil.
+//   MBKAnchoredSheetItemModifier uses onChange to observe the full item so it
+//   can re-anchor on non-nil→non-nil identity swaps, which requires Equatable.
 
 import AppKit
 import SwiftUI
@@ -133,6 +143,10 @@ public extension View {
     /// for the full sheet lifetime — the host view does not need to call
     /// `mbkSetOverlay()` directly.
     ///
+    /// `Item` must conform to both `Identifiable` and `Equatable`. The `Equatable`
+    /// requirement is imposed by `onChange(of: item)` — see WHY Item: Identifiable
+    /// & Equatable in the file header.
+    ///
     /// If `item` changes from one non-nil value to a different non-nil value,
     /// `onChange(of: item)` fires, `anchorSheetWindow()` is called again for
     /// the incoming sheet, and the gate stays armed continuously. This is safe
@@ -142,7 +156,7 @@ public extension View {
     ///
     /// Same anchoring and dismiss-safety characteristics as the `isPresented`
     /// variant — see DISMISS-SAFETY GAP in the file header.
-    func mbkSheet<Item: Identifiable, SheetContent: View>(
+    func mbkSheet<Item: Identifiable & Equatable, SheetContent: View>(
         item: Binding<Item?>,
         overlayGate: MBKOverlayGate,
         @ViewBuilder content: @escaping (Item) -> SheetContent
@@ -222,6 +236,10 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
 /// ViewModifier that anchors a SwiftUI `.sheet(item:)` as a child window of the
 /// popover and manages `MBKOverlayGate` for the sheet's lifetime.
 ///
+/// `Item` must conform to `Identifiable & Equatable`. The `Equatable` requirement
+/// is imposed by `onChange(of: item)` — see WHY Item: Identifiable & Equatable
+/// in the file header.
+///
 /// Uses `onChange(of: item)` rather than `onChange(of: item != nil)` so that
 /// gate management and anchoring fire on *every* item identity change, including
 /// non-nil → non-nil swaps. A Bool-derived predicate would stay true→true on
@@ -232,7 +250,7 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
 /// Same two-hop anchoring strategy and DISMISS-SAFETY GAP as
 /// `MBKAnchoredSheetModifier` — see the file header for full rationale.
 /// Both gaps are fixed together when the TARGET IMPLEMENTATION lands.
-public struct MBKAnchoredSheetItemModifier<Item: Identifiable, SheetContent: View>: ViewModifier {
+public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, SheetContent: View>: ViewModifier {
     /// The item driving presentation. Non-nil = sheet shown; nil = sheet dismissed.
     @Binding public var item: Item?
     /// The shared overlay gate that blocks popover dismiss while the sheet is live.
@@ -248,6 +266,7 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable, SheetContent: Vie
             // non-nil→non-nil swaps. A Bool predicate would evaluate true→true
             // on a swap, onChange would not fire, and the incoming sheet would
             // open un-anchored with the gate not re-armed.
+            // Equatable is required by onChange — see file header.
             .onChange(of: item) { _, newValue in
                 let isPresented = newValue != nil
                 // Gate management mirrors MBKAnchoredSheetModifier exactly.
