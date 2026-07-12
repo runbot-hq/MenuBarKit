@@ -68,6 +68,9 @@
 //   window lifecycle rather than to SwiftUI's binding state. Do not paper over
 //   this with an artificial delay; fix it properly during the migration PR.
 //
+//   Both the isPresented and item variants share this gap. They will be fixed
+//   together when the TARGET IMPLEMENTATION lands.
+//
 // TARGET IMPLEMENTATION (deferred — see notes):
 //   Replace Hop 2 with NSWindow.didBecomeKeyNotification observation:
 //
@@ -102,8 +105,9 @@
 import AppKit
 import SwiftUI
 
-/// View extension providing the `mbkSheet` modifier for popover-anchored sheet presentation.
+/// View extension providing `mbkSheet` modifiers for popover-anchored sheet presentation.
 public extension View {
+
     /// Presents a sheet anchored as a child of the popover window so it
     /// survives outside-clicks and stays visible when the popover loses focus.
     ///
@@ -114,32 +118,44 @@ public extension View {
         overlayGate: MBKOverlayGate,
         @ViewBuilder content: @escaping () -> SheetContent
     ) -> some View {
-        modifier(MBKAnchoredSheetModifier(isPresented: isPresented, overlayGate: overlayGate, sheetContent: content))
+        modifier(MBKAnchoredSheetModifier(
+            isPresented: isPresented,
+            overlayGate: overlayGate,
+            sheetContent: content
+        ))
     }
 
-    /// Item-binding overload of `mbkSheet`. Presents the sheet when `item` is non-nil
-    /// and dismisses it when `item` becomes nil. Passes the unwrapped item to the content closure.
+    /// Presents a sheet anchored as a child of the popover window, driven by
+    /// an optional item binding — matching SwiftUI's `.sheet(item:)` API shape.
     ///
-    /// Internally converts the optional binding to a `Bool` binding so the underlying
-    /// `MBKAnchoredSheetModifier` can manage the overlay gate and window anchoring.
-    func mbkSheet<Item, SheetContent: View>(
+    /// The sheet is presented when `item` becomes non-nil and dismissed when it
+    /// returns to nil. `overlayGate.hasActiveOverlay` is managed automatically
+    /// for the full sheet lifetime — the host view does not need to call
+    /// `mbkSetOverlay()` directly.
+    ///
+    /// If `item` changes from one non-nil value to a different non-nil value,
+    /// `onChange(of: item)` fires, `anchorSheetWindow()` is called again for
+    /// the incoming sheet, and the gate stays armed continuously. This is safe
+    /// because `addChildWindow(_:ordered:)` on an already-child window is a
+    /// no-op. Standard SwiftUI `.sheet(item:)` callers nil the item before
+    /// re-assigning, so this path is defensive rather than commonly exercised.
+    ///
+    /// Same anchoring and dismiss-safety characteristics as the `isPresented`
+    /// variant — see DISMISS-SAFETY GAP in the file header.
+    func mbkSheet<Item: Identifiable, SheetContent: View>(
         item: Binding<Item?>,
         overlayGate: MBKOverlayGate,
         @ViewBuilder content: @escaping (Item) -> SheetContent
     ) -> some View {
-        let isPresented = Binding<Bool>(
-            get: { item.wrappedValue != nil },
-            set: { if !$0 { item.wrappedValue = nil } }
-        )
-        return modifier(MBKAnchoredSheetModifier(
-            isPresented: isPresented,
+        modifier(MBKAnchoredSheetItemModifier(
+            item: item,
             overlayGate: overlayGate,
-            sheetContent: {
-                AnyView(item.wrappedValue.map { AnyView(content($0)) } ?? AnyView(EmptyView()))
-            }
+            sheetContent: content
         ))
     }
 }
+
+// MARK: - isPresented variant
 
 /// ViewModifier that anchors a SwiftUI sheet as a child window of the popover
 /// and manages the `MBKOverlayGate` for the sheet's lifetime.
@@ -196,6 +212,74 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
                 popoverWindow.addChildWindow(sheetWindow, ordered: .above)
             } else {
                 mbkLog("AnchoredSheet", "no borderless+key window found")
+            }
+        }
+    }
+}
+
+// MARK: - item variant
+
+/// ViewModifier that anchors a SwiftUI `.sheet(item:)` as a child window of the
+/// popover and manages `MBKOverlayGate` for the sheet's lifetime.
+///
+/// Uses `onChange(of: item)` rather than `onChange(of: item != nil)` so that
+/// gate management and anchoring fire on *every* item identity change, including
+/// non-nil → non-nil swaps. A Bool-derived predicate would stay true→true on
+/// such a swap, silently skipping `anchorSheetWindow()` and leaving the incoming
+/// sheet un-anchored. Observing `item` directly is correct regardless of whether
+/// callers nil-before-reassign (the standard SwiftUI pattern) or swap directly.
+///
+/// Same two-hop anchoring strategy and DISMISS-SAFETY GAP as
+/// `MBKAnchoredSheetModifier` — see the file header for full rationale.
+/// Both gaps are fixed together when the TARGET IMPLEMENTATION lands.
+public struct MBKAnchoredSheetItemModifier<Item: Identifiable, SheetContent: View>: ViewModifier {
+    /// The item driving presentation. Non-nil = sheet shown; nil = sheet dismissed.
+    @Binding public var item: Item?
+    /// The shared overlay gate that blocks popover dismiss while the sheet is live.
+    public let overlayGate: MBKOverlayGate
+    /// Closure that produces the sheet's content view for a given item.
+    public let sheetContent: (Item) -> SheetContent
+
+    public func body(content: Content) -> some View {
+        content
+            .sheet(item: $item, content: sheetContent)
+            // onChange(of: item) — NOT onChange(of: item != nil):
+            // Observing the full item fires on every identity change, including
+            // non-nil→non-nil swaps. A Bool predicate would evaluate true→true
+            // on a swap, onChange would not fire, and the incoming sheet would
+            // open un-anchored with the gate not re-armed.
+            .onChange(of: item) { _, newValue in
+                let isPresented = newValue != nil
+                // Gate management mirrors MBKAnchoredSheetModifier exactly.
+                // See DISMISS-SAFETY GAP in the file header — the false path
+                // clears the gate before AppKit finishes tearing down the sheet
+                // window. Fixed together with the isPresented variant.
+                overlayGate.hasActiveOverlay = isPresented
+                if isPresented {
+                    Task { @MainActor in anchorSheetWindow() }
+                }
+            }
+    }
+
+    @MainActor
+    private func anchorSheetWindow() {
+        guard let popoverWindow = NSApp.windows.first(where: {
+            $0.styleMask.contains(.nonactivatingPanel)
+        }) else {
+            mbkLog("AnchoredSheet[item]", "no nonactivatingPanel window found — sheet will not be anchored")
+            return
+        }
+        #warning("SPIKE ONLY — dismiss-safety gap: DispatchQueue.main.async must be replaced with NSWindow.didBecomeKeyNotification before migrating to main app (see DISMISS-SAFETY GAP and TARGET IMPLEMENTATION in file header)")
+        DispatchQueue.main.async {
+            if let sheetWindow = NSApp.windows.first(where: {
+                $0 !== popoverWindow
+                    && $0.styleMask.contains(.borderless)
+                    && $0.isKeyWindow
+            }) {
+                mbkLog("AnchoredSheet[item]", "addChildWindow")
+                popoverWindow.addChildWindow(sheetWindow, ordered: .above)
+            } else {
+                mbkLog("AnchoredSheet[item]", "no borderless+key window found")
             }
         }
     }
