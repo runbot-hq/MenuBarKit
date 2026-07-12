@@ -161,10 +161,8 @@ public final class MBKPopoverController: NSObject {
     /// Guards against double-call of setup(). See setup() for rationale.
     private var isSetUp = false
 
-    // nonisolated(unsafe): see nonisolated(unsafe) section in the file header.
     /// Global mouse-down event monitor token. nonisolated(unsafe) — see file header.
     nonisolated(unsafe) private var eventMonitor: Any?
-    // nonisolated(unsafe): same rationale as eventMonitor above — see file header.
     /// Workspace app-switch observer token. nonisolated(unsafe) — see file header.
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
@@ -271,12 +269,6 @@ public final class MBKPopoverController: NSObject {
 
     /// Installs the NSWorkspace app-switch observer that closes the popover on app switch.
     private func setupWorkspaceObserver() {
-        // queue: nil + Task { @MainActor } is the Swift 6-correct pattern — see file header.
-        //
-        // STAY-OPEN BEHAVIOUR: when a sheet or file picker is active, the guard
-        // below skips performClose — the popover stays open on app-switch.
-        // This is a deliberate trade-off. See STAY-OPEN-WHILE-SHEET-ACTIVE in
-        // the file header if you want to implement the hide-and-restore alternative.
         workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -290,9 +282,6 @@ public final class MBKPopoverController: NSObject {
                     mbkLog("PopoverController", "workspace observer — self-activation, ignoring")
                     return
                 }
-                // Keep popover open while any overlay (sheet / file picker) is active.
-                // See STAY-OPEN-WHILE-SHEET-ACTIVE in the file header for the
-                // trade-off rationale and the hide-and-restore alternative.
                 guard !overlayGate.hasActiveOverlay else {
                     mbkLog("PopoverController", "workspace observer — overlay active, keeping popover open")
                     return
@@ -329,8 +318,6 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Deallocation
 
     // See deinit TEARDOWN in the file header for thread-safety rationale.
-    // Do NOT wrap these removals in Task { @MainActor } — self is already
-    // deallocated when a Task enqueued from deinit runs (use-after-free).
     deinit {
         if let observer = workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
@@ -343,6 +330,7 @@ public final class MBKPopoverController: NSObject {
 
 // MARK: - NSPopoverDelegate
 
+/// `NSPopoverDelegate` conformance — show/close lifecycle and dismiss gating.
 extension MBKPopoverController: NSPopoverDelegate {
     /// Highlights the status-bar button when the popover is about to appear.
     public func popoverWillShow(_ notification: Notification) {

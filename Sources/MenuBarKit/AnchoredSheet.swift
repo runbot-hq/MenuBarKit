@@ -207,15 +207,13 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
         guard let popoverWindow = NSApp.windows.first(where: {
             $0.styleMask.contains(.nonactivatingPanel)
         }) else {
-            mbkLog("AnchoredSheet", "no nonactivatingPanel window found — sheet will not be anchored")
+            mbkLog("AnchoredSheet", "no nonactivatingPanel window — sheet will not be anchored")
             return
         }
         // Hop 2: drain one run-loop turn so the sheet NSWindow exists.
         // ⚠️ SPIKE ONLY — replace with NSWindow.didBecomeKeyNotification before migrating.
-        // See SHEET WINDOW DISCRIMINATOR in the file header before attempting
-        // to strengthen the predicate — NSHostingController<AnyView> was tried
-        // and does not match SwiftUI's internal sheet window type.
-        #warning("SPIKE ONLY — dismiss-safety gap: DispatchQueue.main.async must be replaced with NSWindow.didBecomeKeyNotification before migrating to main app (see DISMISS-SAFETY GAP and TARGET IMPLEMENTATION in file header)")
+        // See SHEET WINDOW DISCRIMINATOR in the file header before strengthening the predicate.
+        #warning("SPIKE ONLY: replace DispatchQueue.main.async with NSWindow.didBecomeKeyNotification — see DISMISS-SAFETY GAP and TARGET IMPLEMENTATION in file header")
         DispatchQueue.main.async {
             if let sheetWindow = NSApp.windows.first(where: {
                 $0 !== popoverWindow
@@ -287,10 +285,10 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
         guard let popoverWindow = NSApp.windows.first(where: {
             $0.styleMask.contains(.nonactivatingPanel)
         }) else {
-            mbkLog("AnchoredSheet[item]", "no nonactivatingPanel window found — sheet will not be anchored")
+            mbkLog("AnchoredSheet[item]", "no nonactivatingPanel window — sheet will not be anchored")
             return
         }
-        #warning("SPIKE ONLY — dismiss-safety gap: DispatchQueue.main.async must be replaced with NSWindow.didBecomeKeyNotification before migrating to main app (see DISMISS-SAFETY GAP and TARGET IMPLEMENTATION in file header)")
+        #warning("SPIKE ONLY: replace DispatchQueue.main.async with NSWindow.didBecomeKeyNotification — see DISMISS-SAFETY GAP and TARGET IMPLEMENTATION in file header")
         DispatchQueue.main.async {
             if let sheetWindow = NSApp.windows.first(where: {
                 $0 !== popoverWindow
