@@ -1,4 +1,4 @@
-<img width="240" alt="img" src="icon.png">
+<img width="240" alt="img" src="logo.png">
 
 # MenuBarKit
 
