@@ -2,6 +2,19 @@
 
 A Swift package for the NSPopover + SwiftUI sheet + NSOpenPanel layer of a macOS menu-bar app. Swift 6.2, macOS 26, `@MainActor`-first throughout.
 
+**Platform & Stack**
+
+![macOS 26+](https://img.shields.io/badge/macOS-26%2B-black?logo=apple&logoColor=white)
+![Swift 6.2](https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white)
+![SPM](https://img.shields.io/badge/SPM-compatible-F05138?logo=swift&logoColor=white)
+
+**CI**
+
+![Unit Tests](https://github.com/runbot-hq/MenuBarKit/actions/workflows/swift-test.yml/badge.svg)
+![SwiftLint](https://github.com/runbot-hq/MenuBarKit/actions/workflows/swiftlint.yml/badge.svg)
+![Periphery](https://github.com/runbot-hq/MenuBarKit/actions/workflows/periphery.yml/badge.svg)
+[![Greptile](https://img.shields.io/badge/🦎%20AI%20Review-Greptile-6C47FF?logoColor=white)](https://greptile.com)
+
 ## Installation
 
 ```swift
@@ -62,4 +75,4 @@ This package is **work in progress**. Known issues are documented inline with `/
 - [ ] Replace `DispatchQueue.main.async` in `anchorSheetWindow()` with `NSWindow.didBecomeKeyNotification` (see `TARGET IMPLEMENTATION` in `AnchoredSheet.swift`)
 - [ ] Fix dismiss-safety gap — tie gate lifetime to window lifecycle, not SwiftUI binding state
 - [ ] Strengthen `sheetChildWindow` predicate for multi-child-window environments
-- [ ] Add `MenuBarKitTests` target covering gate logic and teardown paths
+- [ ] Add more test coverage (gate teardown paths, popover delegate logic)

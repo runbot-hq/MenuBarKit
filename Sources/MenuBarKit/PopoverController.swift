@@ -19,8 +19,8 @@
 //   popoverShouldClose returns false (via overlayGate.hasActiveOverlay), and
 //   the workspace observer skips performClose while any overlay is active.
 //
-//   This is the simpler behaviour: the user's mental model is "sheet is
-//   blocking, nothing else happens until I dismiss it." No hide-and-restore
+//   This is the simpler behaviour: the user's mental model is “sheet is
+//   blocking, nothing else happens until I dismiss it.” No hide-and-restore
 //   cycle to reason about.
 //
 //   The alternative — hide the popover window without closing it so the sheet
@@ -29,9 +29,8 @@
 //   on app-switch as they expect, even with a sheet open). If you want to
 //   implement this, see `preservedSheetWindowHide`,
 //   `hidePopoverWindowsPreservingSheets()`, and
-//   `restorePopoverWindowsPreservingSheetsIfNeeded()` in RunBot's
-//   `PopoverLifecycleCoordinator.swift` (git history) for a reference
-//   implementation. That approach requires:
+//   `restorePopoverWindowsPreservingSheetsIfNeeded()` in the
+//   `PopoverLifecycleCoordinator.swift` reference implementation. That approach requires:
 //     1. Hiding the NSPopover backing window (not performClose) when the
 //        workspace observer fires and a sheet is active.
 //     2. Tracking a `preservedSheetWindowHide` flag.
@@ -152,20 +151,31 @@ public final class MBKPopoverController: NSObject {
 
     // MARK: - Owned objects
 
+    /// The status-bar item. Assigned in `setup()` — see IMPLICIT-UNWRAPPED OPTIONALS in the file header.
     private var statusItem: NSStatusItem!
+    /// The managed NSPopover. Assigned in `setup()` — see IMPLICIT-UNWRAPPED OPTIONALS in the file header.
     private var popover: NSPopover!
+    /// Hosts the root SwiftUI view. Assigned in `setup()` — see IMPLICIT-UNWRAPPED OPTIONALS in the file header.
     private var hostingController: NSHostingController<AnyView>!
 
     /// Guards against double-call of setup(). See setup() for rationale.
     private var isSetUp = false
 
     // nonisolated(unsafe): see nonisolated(unsafe) section in the file header.
+    /// Global mouse-down event monitor token. nonisolated(unsafe) — see file header.
     nonisolated(unsafe) private var eventMonitor: Any?
     // nonisolated(unsafe): same rationale as eventMonitor above — see file header.
+    /// Workspace app-switch observer token. nonisolated(unsafe) — see file header.
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
     // MARK: - Init
 
+    /// Creates the controller with a root SwiftUI view and shared overlay gate.
+    /// - Parameters:
+    ///   - rootView: The root view displayed inside the popover.
+    ///   - overlayGate: Shared gate; blocks dismiss while a sheet or picker is live.
+    ///   - symbolName: SF Symbol name for the status-bar icon. Defaults to `"menubar.rectangle"`.
+    ///   - contentSize: Initial popover content size. Defaults to 320×300.
     public init<Content: View>(
         rootView: Content,
         overlayGate: MBKOverlayGate,
@@ -204,6 +214,7 @@ public final class MBKPopoverController: NSObject {
 
     // MARK: - Status item
 
+    /// Creates and configures the NSStatusItem and its button.
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
@@ -214,6 +225,7 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
+    /// Toggles the popover open or closed when the status-bar button is clicked.
     @objc private func togglePopover() {
         if popover.isShown {
             popover.performClose(nil)
@@ -222,6 +234,7 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
+    /// Shows the popover anchored to the status-bar button and starts the event monitor.
     private func openPopover() {
         guard let button = statusItem.button else { return }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -234,12 +247,14 @@ public final class MBKPopoverController: NSObject {
         startEventMonitor()
     }
 
+    /// Sets the status-bar button highlight state.
     private func setButtonHighlight(_ on: Bool) {
         statusItem.button?.isHighlighted = on
     }
 
     // MARK: - Popover setup
 
+    /// Creates and configures the NSPopover with the hosted SwiftUI root view.
     private func setupPopover() {
         hostingController = NSHostingController(rootView: rootView)
         hostingController.sizingOptions = .preferredContentSize
@@ -254,6 +269,7 @@ public final class MBKPopoverController: NSObject {
 
     // MARK: - Workspace observer
 
+    /// Installs the NSWorkspace app-switch observer that closes the popover on app switch.
     private func setupWorkspaceObserver() {
         // queue: nil + Task { @MainActor } is the Swift 6-correct pattern — see file header.
         //
@@ -289,6 +305,7 @@ public final class MBKPopoverController: NSObject {
 
     // MARK: - Event monitor
 
+    /// Installs a global mouse-down monitor that closes the popover on outside clicks.
     private func startEventMonitor() {
         guard eventMonitor == nil else { return }
         eventMonitor = NSEvent.addGlobalMonitorForEvents(
@@ -301,6 +318,7 @@ public final class MBKPopoverController: NSObject {
         mbkLog("PopoverController", "event monitor started")
     }
 
+    /// Removes the global mouse-down monitor installed by `startEventMonitor()`.
     private func stopEventMonitor() {
         guard let monitor = eventMonitor else { return }
         NSEvent.removeMonitor(monitor)
@@ -326,16 +344,19 @@ public final class MBKPopoverController: NSObject {
 // MARK: - NSPopoverDelegate
 
 extension MBKPopoverController: NSPopoverDelegate {
+    /// Highlights the status-bar button when the popover is about to appear.
     public func popoverWillShow(_ notification: Notification) {
         setButtonHighlight(true)
     }
 
+    /// Blocks dismiss while any overlay (sheet or file picker) is active.
     public func popoverShouldClose(_ popover: NSPopover) -> Bool {
         let block = overlayGate.hasActiveOverlay
         mbkLog("PopoverController", "popoverShouldClose blocked=\(block)")
         return !block
     }
 
+    /// Cleans up after popover close: removes highlight, stops monitor, resets gate.
     public func popoverDidClose(_ notification: Notification) {
         mbkLog("PopoverController", "popoverDidClose")
         setButtonHighlight(false)

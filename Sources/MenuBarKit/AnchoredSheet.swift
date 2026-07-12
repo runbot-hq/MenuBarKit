@@ -258,6 +258,7 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
     /// Closure that produces the sheet's content view for a given item.
     public let sheetContent: (Item) -> SheetContent
 
+    /// Applies the sheet presentation and anchoring logic to the wrapped view.
     public func body(content: Content) -> some View {
         content
             .sheet(item: $item, content: sheetContent)
@@ -280,6 +281,7 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
             }
     }
 
+    /// Finds the sheet NSWindow and wires it as a child of the popover window.
     @MainActor
     private func anchorSheetWindow() {
         guard let popoverWindow = NSApp.windows.first(where: {

@@ -95,7 +95,8 @@ public enum MBKPickerTarget {
 /// - Parameters:
 ///   - target: Whether to anchor the picker to the popover or the sheet child window.
 ///   - overlayGate: The shared overlay gate; set to `true` while the picker is open.
-///   - message: Optional descriptive message shown in the panel header. Pass `nil` to use the system default.
+///   - message: Optional descriptive message shown in the panel header.
+///     Pass `nil` to use the system default.
 ///   - completion: Called on the main actor with the selected `URL`, or `nil` if cancelled.
 @MainActor
 public func mbkOpenFilePicker(
