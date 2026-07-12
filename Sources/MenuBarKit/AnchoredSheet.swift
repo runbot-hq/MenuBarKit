@@ -137,6 +137,8 @@ public extension View {
             sheetContent: {
                 if let value = item.wrappedValue {
                     content(value)
+                } else {
+                    EmptyView()
                 }
             }
         ))
