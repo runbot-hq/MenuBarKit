@@ -10,19 +10,26 @@ let package = Package(
         .library(
             name: "MenuBarKit",
             targets: ["MenuBarKit"]
-        ),
+        )
     ],
     targets: [
         .target(
             name: "MenuBarKit",
             dependencies: [],
             path: "Sources/MenuBarKit",
-            // README.md is a developer reference doc — not a bundleable resource.
-            // Exclude it to silence the SPM unhandled-resource warning.
-            exclude: ["README.md"],
             swiftSettings: [
-                .swiftLanguageMode(.v6)
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault")
             ]
         ),
+        .testTarget(
+            name: "MenuBarKitTests",
+            dependencies: ["MenuBarKit"],
+            path: "Tests/MenuBarKitTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault")
+            ]
+        )
     ]
 )
