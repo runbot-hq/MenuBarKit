@@ -135,11 +135,7 @@ public extension View {
             isPresented: isPresented,
             overlayGate: overlayGate,
             sheetContent: {
-                if let value = item.wrappedValue {
-                    content(value)
-                } else {
-                    EmptyView()
-                }
+                AnyView(item.wrappedValue.map { content($0) } ?? AnyView(EmptyView()))
             }
         ))
     }
