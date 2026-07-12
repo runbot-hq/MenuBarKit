@@ -135,7 +135,7 @@ public extension View {
             isPresented: isPresented,
             overlayGate: overlayGate,
             sheetContent: {
-                AnyView(item.wrappedValue.map { content($0) } ?? AnyView(EmptyView()))
+                AnyView(item.wrappedValue.map { AnyView(content($0)) } ?? AnyView(EmptyView()))
             }
         ))
     }
