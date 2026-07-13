@@ -60,6 +60,7 @@ import SwiftUI
 
 // MARK: - View extension
 
+/// View extension providing `mbkAlert` modifier overloads.
 public extension View {
 
     /// Presents an alert and manages `overlayGate.hasActiveOverlay` for its lifetime.
