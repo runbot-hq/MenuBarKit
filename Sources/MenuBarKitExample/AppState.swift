@@ -27,10 +27,10 @@ enum Route: Equatable {
 final class AppState {
     /// Currently displayed route.
     var route: Route = .main
-    /// Path selected by the file picker opened from SettingsView (popover context).
-    var pickedPath: String = ""
-    /// Path selected by the file picker opened from SheetView (sheet context).
-    var sheetPickedPath: String = ""
+    /// URL selected by the file picker opened from SettingsView (popover context). nil until first pick.
+    var pickedURL: URL?
+    /// URL selected by the file picker opened from SheetView (sheet context). nil until first pick.
+    var sheetPickedURL: URL?
     /// Controls the error alert presented from SettingsView (popover level).
     var showAlert: Bool = false
     /// Controls the error alert presented from inside SheetView.

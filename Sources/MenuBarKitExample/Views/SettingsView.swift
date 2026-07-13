@@ -24,6 +24,7 @@ struct SettingsView: View {
     /// App state injected from the environment.
     @Environment(AppState.self) private var appState
     /// Overlay gate injected from the environment.
+    // TODO(#2): remove overlayGate once MBK modifiers resolve it from @Environment internally.
     @Environment(MBKOverlayGate.self) private var overlayGate
     /// Controls whether the anchored sheet is presented.
     @State private var showSheet = false
@@ -36,6 +37,7 @@ struct SettingsView: View {
             Divider()
 
             // Scenario 1
+            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
             Button("Open sheet") { showSheet = true }
                 .mbkSheet(isPresented: $showSheet, overlayGate: overlayGate) {
                     SheetView()
@@ -44,18 +46,20 @@ struct SettingsView: View {
                 }
 
             // Scenario 2
+            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
             Button("Pick folder (popover)") {
                 mbkOpenFilePicker(target: .popover, overlayGate: overlayGate) { url in
-                    appState.pickedPath = url?.path ?? ""
+                    appState.pickedURL = url
                 }
             }
-            if !appState.pickedPath.isEmpty {
-                Text(appState.pickedPath)
+            if let path = appState.pickedURL?.path {
+                Text(path)
                     .font(.system(size: 11, design: .monospaced))
                     .lineLimit(1).truncationMode(.middle)
             }
 
             // Scenario 3
+            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
             GroupBox("Alert from popover") {
                 Button("Show alert") { appState.showAlert = true }
                 Text("Alert should appear. Popover stays alive.")

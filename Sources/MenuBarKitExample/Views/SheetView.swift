@@ -18,6 +18,7 @@ struct SheetView: View {
     /// App state injected from the environment.
     @Environment(AppState.self) private var appState
     /// Overlay gate injected from the environment.
+    // TODO(#2): remove overlayGate once MBK modifiers resolve it from @Environment internally.
     @Environment(MBKOverlayGate.self) private var overlayGate
     /// SwiftUI dismiss action.
     @Environment(\.dismiss) private var dismiss
@@ -39,14 +40,15 @@ struct SheetView: View {
                 Text("This is a test error alert shown from inside a sheet.")
             }
 
+            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
             GroupBox("File picker from sheet") {
                 Button("Pick folder (sheet)") {
                     mbkOpenFilePicker(target: .sheet, overlayGate: overlayGate) { url in
-                        appState.sheetPickedPath = url?.path ?? ""
+                        appState.sheetPickedURL = url
                     }
                 }
-                if !appState.sheetPickedPath.isEmpty {
-                    Text(appState.sheetPickedPath)
+                if let path = appState.sheetPickedURL?.path {
+                    Text(path)
                         .font(.system(size: 11, design: .monospaced))
                         .lineLimit(1).truncationMode(.middle)
                 }
