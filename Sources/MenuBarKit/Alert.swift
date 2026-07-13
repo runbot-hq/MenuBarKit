@@ -122,6 +122,9 @@ public extension View {
 ///
 /// See file header for design rationale, concurrent-overlay safety notes,
 /// and migration guidance.
+///
+/// Prefer the `View.mbkAlert(...)` convenience overloads over constructing
+/// this modifier directly.
 public struct MBKAlertModifier<A: View, M: View>: ViewModifier {
     /// The alert title.
     public let title: String
@@ -140,6 +143,27 @@ public struct MBKAlertModifier<A: View, M: View>: ViewModifier {
     /// if true, the gate was not ours to clear — the concurrent overlay
     /// still owns it.
     @State private var gateWasArmedByConcurrentOverlay = false
+
+    /// Creates the modifier.
+    /// - Parameters:
+    ///   - title: The alert title string.
+    ///   - isPresented: Binding that controls presentation.
+    ///   - overlayGate: The gate owned by the enclosing `MBKPopoverController`.
+    ///   - actions: Alert action buttons.
+    ///   - message: Secondary message view shown below the title.
+    public init(
+        title: String,
+        isPresented: Binding<Bool>,
+        overlayGate: MBKOverlayGate,
+        @ViewBuilder actions: @escaping () -> A,
+        @ViewBuilder message: @escaping () -> M
+    ) {
+        self.title = title
+        self._isPresented = isPresented
+        self.overlayGate = overlayGate
+        self.actions = actions
+        self.message = message
+    }
 
     /// Applies the alert and gate-management logic.
     public func body(content: Content) -> some View {
