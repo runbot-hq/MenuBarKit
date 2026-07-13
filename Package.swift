@@ -10,6 +10,9 @@ let package = Package(
         .library(
             name: "MenuBarKit",
             targets: ["MenuBarKit"]
+            // MenuBarKitExample is intentionally NOT listed here.
+            // It is an internal example app for CI validation only.
+            // Consumers of this package via SPM URL will never see it.
         )
     ],
     targets: [
@@ -17,6 +20,20 @@ let package = Package(
             name: "MenuBarKit",
             dependencies: [],
             path: "Sources/MenuBarKit",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault")
+            ]
+        ),
+        // ── Example app ──────────────────────────────────────────────────────────
+        // Thin consumer of MenuBarKit. Validates the public API compiles and
+        // exercises all three scenarios (sheet, file picker, alert) on every CI run.
+        // Not in products — invisible to downstream SPM consumers.
+        // Run locally with: swift run MenuBarKitExample
+        .executableTarget(
+            name: "MenuBarKitExample",
+            dependencies: [.target(name: "MenuBarKit")],
+            path: "Sources/MenuBarKitExample",
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .enableUpcomingFeature("NonisolatedNonsendingByDefault")
