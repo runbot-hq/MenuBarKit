@@ -8,8 +8,9 @@ excluded:
   - .build
   - Package.swift
   - Tests
+  - Sources/MenuBarKitExample   # example app -- build harness only, not library code
 
-# ── Opt-in rules ──────────────────────────────────────────────────────────────
+# -- Opt-in rules ---------------------------------------------------------------
 opt_in_rules:
   - closure_spacing
   - explicit_init
@@ -23,7 +24,7 @@ opt_in_rules:
   - missing_docs
   - file_header
 
-# ── Rule configuration ────────────────────────────────────────────────────────
+# -- Rule configuration ---------------------------------------------------------
 nesting:
   type_level:
     warning: 2
@@ -51,7 +52,7 @@ missing_docs:
 file_header:
   required_pattern: "^// [\\w+]+\\.swift\\n// MenuBarKit"
 
-# ── Disabled rules ────────────────────────────────────────────────────────────
+# -- Disabled rules -------------------------------------------------------------
 disabled_rules:
   - todo
   - trailing_comma

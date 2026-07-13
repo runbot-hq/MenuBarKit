@@ -2,7 +2,7 @@
 
 # MenuBarKit
 
-A Swift package for the NSPopover + SwiftUI sheet + NSOpenPanel layer of a macOS menu-bar app. Swift 6.2, macOS 26, `@MainActor`-first throughout.
+A Swift package for the NSPopover + SwiftUI sheet + NSOpenPanel + alert layer of a macOS menu-bar app. Swift 6.2, macOS 26, `@MainActor`-first throughout.
 
 **Platform & Stack**
 
@@ -23,7 +23,7 @@ A Swift package for the NSPopover + SwiftUI sheet + NSOpenPanel layer of a macOS
 .package(url: "https://github.com/runbot-hq/MenuBarKit", branch: "main")
 ```
 
-## What’s in the box
+## What's in the box
 
 | File | What it provides |
 |---|---|
@@ -31,6 +31,7 @@ A Swift package for the NSPopover + SwiftUI sheet + NSOpenPanel layer of a macOS
 | `PopoverController.swift` | `MBKPopoverController` — full `NSPopover` + `NSStatusItem` lifecycle; outside-click monitor; workspace app-switch observer |
 | `AnchoredSheet.swift` | `.mbkSheet(isPresented:overlayGate:content:)` and `.mbkSheet(item:overlayGate:content:)` — SwiftUI sheet anchored as a child window of the popover so it survives outside-clicks and focus changes |
 | `FilePicker.swift` | `mbkOpenFilePicker(target:overlayGate:message:completion:)` — `NSOpenPanel` via `beginSheetModal`, anchored to the correct window (popover or sheet child) |
+| `Alert.swift` | `.mbkAlert(_:isPresented:overlayGate:actions:)` and `.mbkAlert(_:isPresented:overlayGate:actions:message:)` — drop-in replacement for `.alert()` that gates `MBKOverlayGate` for the full alert lifetime, including safe handling of alerts presented while a sheet is concurrently open |
 | `Logging.swift` | `mbkLog()` — `#if DEBUG`-gated, `@inlinable`, zero-cost in release |
 
 ## Usage
@@ -62,6 +63,13 @@ mbkOpenFilePicker(target: .popover, overlayGate: gate) { url in
 mbkOpenFilePicker(target: .sheet, overlayGate: gate, message: "Select a directory") { url in
     // handle url
 }
+
+// 6. Alert — gate managed automatically; safe when a sheet is concurrently open
+.mbkAlert("Something went wrong", isPresented: $showAlert, overlayGate: gate) {
+    Button("OK", role: .cancel) {}
+} message: {
+    Text("Please try again.")
+}
 ```
 
 ## Known limitations
@@ -78,3 +86,4 @@ This package is **work in progress**. Known issues are documented inline with `/
 - [ ] Fix dismiss-safety gap — tie gate lifetime to window lifecycle, not SwiftUI binding state
 - [ ] Strengthen `sheetChildWindow` predicate for multi-child-window environments
 - [ ] Add more test coverage (gate teardown paths, popover delegate logic)
+- [ ] Remove explicit `overlayGate:` parameter from all MBK modifiers — resolve via `@Environment` internally (see [#2](https://github.com/runbot-hq/MenuBarKit/issues/2))
