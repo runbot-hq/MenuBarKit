@@ -1,5 +1,3 @@
-<img width="240" alt="img" src="logo.png">
-
 # MenuBarKit
 
 A Swift package for the NSPopover + SwiftUI sheet + NSOpenPanel + alert layer of a macOS menu-bar app. Swift 6.2, macOS 26, `@MainActor`-first throughout.
