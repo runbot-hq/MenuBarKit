@@ -8,14 +8,14 @@
 //   buttonMidXScreen — button centre in screen coords (constant per open)
 //   chromeDelta      — pw.frame.size − contentSize (arrow+border, constant)
 //
-// On every subsequent resize (no show() — eliminates flicker):
-//   1. Compute target frame from contentSize + chromeDelta.
-//   2. pw.orderOut(nil)        — hide before any geometry changes
-//   3. popover.contentSize = … — resize content (repaints arrow chrome)
-//   4. pw.setFrame(…)         — position while offscreen
-//   5. pw.orderFront(nil)      — reappear at exact final position
+// On every subsequent resize:
+//   1. Compute target frame from contentSize + chromeDelta (no AppKit reads).
+//   2. popover.contentSize = size
+//   3. pw.setFrame(targetFrame, display: true)  — reposition + force repaint
 //
-// No intermediate positions are ever visible on screen.
+// display:true forces an immediate redraw of the entire window including
+// the arrow chrome, so the arrow is always painted at the correct position.
+// No show(), no orderOut/orderFront — NSPopover internal state is untouched.
 
 import AppKit
 import Combine
@@ -178,11 +178,9 @@ public final class MBKPopoverController: NSObject {
                "reshowWithSize — content=(\(size.width),\(size.height)) " +
                "target=(\(newX),\(newY),\(winW),\(winH))")
 
-        // Hide → resize → reposition → show. No intermediate state is visible.
-        pw.orderOut(nil)
         popover.contentSize = size
-        pw.setFrame(targetFrame, display: false)
-        pw.orderFront(nil)
+        // display:true forces immediate repaint of arrow chrome at new position.
+        pw.setFrame(targetFrame, display: true)
 
         mbkLog("PopoverController", "reshowWithSize — pw.frame after=\(pw.frame)")
     }
