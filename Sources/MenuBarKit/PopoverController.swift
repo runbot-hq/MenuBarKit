@@ -33,7 +33,7 @@
 //
 //   When a write IS skipped, the desired size is stored as pendingContentSize.
 //   The next applyContentSize call that passes the hidden guard drains it,
-//   forcing a write+re-anchor even if the size appears unchanged.
+//   forcing a write+re-anchor even if the size appears unchanged in-flight.
 
 import AppKit
 import SwiftUI
@@ -58,8 +58,8 @@ public final class MBKPopoverController: NSObject {
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
-    /// Size that was skipped during a menubar-hidden transient.
-    /// Drained on the next visible applyContentSize call.
+    /// Non-nil when a contentSize write was skipped during a menubar-hidden
+    /// transient. Drained (and re-anchor forced) on the next visible call.
     private var pendingContentSize: NSSize?
 
     // MARK: - Init
@@ -169,17 +169,12 @@ public final class MBKPopoverController: NSObject {
 
     /// Writes a new contentSize to the popover and re-anchors the arrow.
     ///
-    /// After writing contentSize, calls show() again with the same 1pt
-    /// centerRect at button midX. This re-runs AppKit's anchor geometry so
-    /// the arrow stays centered regardless of chrome or internal layout.
+    /// Skips when auto-hide menubar is animating (buttonY > screenH).
+    /// Note: buttonY == screenH is the VISIBLE boundary — do NOT skip it.
     ///
-    /// Skips the write when the auto-hide menubar is hidden (buttonY > screenH).
-    /// Note: buttonY == screenH is the visible boundary state (button flush with
-    /// screen top edge) and must NOT be treated as hidden.
-    ///
-    /// When skipped, stores the desired size as pendingContentSize and drains
-    /// it on the next visible call, forcing a write+re-anchor even if the
-    /// in-flight size appears unchanged.
+    /// When skipped, stores size as pendingContentSize. On the next visible
+    /// call, drains it and forces a write+re-anchor even if the size appears
+    /// unchanged (the popover geometry is stale from the skip).
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -190,9 +185,7 @@ public final class MBKPopoverController: NSObject {
         }
 
         // Auto-hide menubar guard.
-        // buttonWin.screen can be transiently nil while the menubar is hiding.
-        // Fall back to NSScreen.main rather than treating nil as hidden.
-        // Use > not >=: buttonY==screenH is the visible boundary, not hidden.
+        // Use > not >=: buttonY==screenH is visible (button flush with top edge).
         let buttonY = buttonWin.frame.origin.y
         let resolvedScreen = buttonWin.screen ?? NSScreen.main
         let screenH = resolvedScreen?.frame.height ?? CGFloat.infinity
@@ -204,47 +197,36 @@ public final class MBKPopoverController: NSObject {
                + "screenSource=\(screenSource)")
         guard !isMenuBarHidden else {
             pendingContentSize = preferred
-            mbkLog("PopoverController", "applyContentSize — SKIP: menubar hidden (buttonY=\(buttonY) > screenH=\(screenH)), stored pending")
+            mbkLog("PopoverController", "applyContentSize — SKIP (menubar hidden), stored pending")
             return
         }
 
-        // Drain any size that was skipped during a hidden transient.
-        // If we have a pending size that differs from preferred, use it so the
-        // popover reflects the latest desired size. Then clear the pending.
-        let effective: NSSize
+        // Drain any pending size from a skipped cycle.
+        // forceReanchor=true bypasses the size-unchanged guard so the popover
+        // geometry is corrected even if preferred already matches contentSize.
+        let forceReanchor: Bool
         if let pending = pendingContentSize {
             pendingContentSize = nil
-            // Use whichever is the latest: if pending == preferred, no difference.
-            // If they differ, preferred is the most recent so use that.
-            effective = preferred
+            forceReanchor = true
             mbkLog("PopoverController", "applyContentSize — drained pending=(\(pending.width),\(pending.height))")
         } else {
-            effective = preferred
+            forceReanchor = false
         }
 
         let currentSize = popover.contentSize
-        let hasPending = pendingContentSize != nil  // already cleared above, use flag before clear
-        guard abs(currentSize.width - effective.width) > 1
-                || abs(currentSize.height - effective.height) > 1
-                || (pendingContentSize == nil && effective != preferred) else {
-            // Also force a re-anchor if we just drained a pending (geometry may
-            // be stale even if size matches). Check by comparing effective to
-            // what popover currently has AND whether we had a pending.
-            if abs(currentSize.width - effective.width) <= 1
-                && abs(currentSize.height - effective.height) <= 1 {
-                // Size already matches — but if we drained a pending we still
-                // need to re-anchor. The hasPending flag is now stale (cleared).
-                // Re-check: if we entered this block, no pending was set above.
-                mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
-                return
-            }
+        let sizeChanged = abs(currentSize.width - preferred.width) > 1
+                       || abs(currentSize.height - preferred.height) > 1
+        guard sizeChanged || forceReanchor else {
+            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
+            return
         }
 
         mbkLog("PopoverController",
-               "applyContentSize — WRITING (\(effective.width),\(effective.height)) "
-               + "delta=(\(effective.width - currentSize.width),\(effective.height - currentSize.height))")
+               "applyContentSize — WRITING (\(preferred.width),\(preferred.height)) "
+               + "forceReanchor=\(forceReanchor) "
+               + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
 
-        popover.contentSize = effective
+        popover.contentSize = preferred
         showPopoverAnchored(to: button)
 
         mbkLog("PopoverController", "applyContentSize — done")
