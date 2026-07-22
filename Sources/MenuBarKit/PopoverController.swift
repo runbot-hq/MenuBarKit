@@ -5,35 +5,39 @@
 // Zero knowledge of the host app's views or state — all app-specific behaviour
 // is injected via closures at configuration time.
 //
-// ARROW CENTERING:
-//   show() pre-sizes contentSize to fittingSize so AppKit places the window
-//   at the correct width immediately. A 1pt positioningRect at button midX
-//   is used so AppKit anchors the arrow to the button center on open.
+// ARROW CENTERING ON RESIZE (applyContentSize):
 //
-//   On resize (applyContentSize):
-//     1. Write contentSize.
-//     2. Call show() again with the same 1pt centerRect.
-//        Calling show() on an already-shown popover is a no-op for visibility
-//        but re-runs AppKit's anchor geometry, re-centering the arrow over
-//        the button. Manual setFrameOrigin is NOT used: the arrow position
-//        inside the NSPopover window is not simply windowW/2 and cannot be
-//        reliably computed without AppKit's internal layout pass.
+//   show() on an already-shown popover does NOT re-run AppKit's anchor
+//   geometry — the arrow stays wherever it was when the popover first opened.
+//   Manual repositioning via setFrameOrigin is required.
 //
-//   popover.animates = false ensures no visible jump on the re-show.
+//   The arrow tip is always at the horizontal center of the content view, not
+//   the center of the window. The window is wider than the content view by the
+//   chrome (shadow + border). The chrome left inset is measured live:
+//
+//     chromeLeft = contentView.frame.minX  (content view origin in window coords
+//                                           equals the left chrome width because
+//                                           pw.frame.origin is the window origin)
+//
+//   Desired window origin X so that arrow (= content center) is over buttonMidX:
+//
+//     targetX = buttonMidX - (preferred.width / 2 + chromeLeft)
+//
+//   chromeLeft is measured after writing contentSize while the window is still
+//   on screen. It is stable (~13pt on all tested macOS versions).
+//
+//   A cached chromeLeft is stored after the first successful measurement and
+//   reused on subsequent calls, avoiding a stale-frame race on rapid resizes.
 //
 // SIDE-JUMP UNDER AUTO-HIDE MENUBAR:
-//   Signal: buttonY > screenH (Dock pushes NSStatusItem window strictly past
-//   the top edge). Observed: buttonY=982 screenH=982 is the VISIBLE boundary
-//   state — the button is flush with the top of screen, NOT hidden. Only
-//   buttonY strictly greater than screenH means the button is off screen.
+//   Signal: buttonY > screenH (button strictly off top of screen).
+//   buttonY == screenH is the VISIBLE boundary — button flush with screen top.
 //
 //   buttonWin.screen can transiently return nil while the menubar is hiding.
-//   We fall back to NSScreen.main rather than treating nil as "hidden".
-//   If there is genuinely no screen, use CGFloat.infinity (never hidden).
+//   Fall back to NSScreen.main. If no screen at all, use CGFloat.infinity.
 //
-//   When a write IS skipped, the desired size is stored as pendingContentSize.
-//   The next applyContentSize call that passes the hidden guard drains it,
-//   forcing a write+re-anchor even if the size appears unchanged in-flight.
+//   When a write is skipped, the size is stored as pendingContentSize and
+//   drained (with forceReanchor=true) on the next visible call.
 
 import AppKit
 import SwiftUI
@@ -58,8 +62,11 @@ public final class MBKPopoverController: NSObject {
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
-    /// Non-nil when a contentSize write was skipped during a menubar-hidden
-    /// transient. Drained (and re-anchor forced) on the next visible call.
+    /// Cached left chrome inset (window.minX → contentView.minX).
+    /// Measured once from the live window; stable across resize.
+    private var cachedChromeLeft: CGFloat?
+
+    /// Size skipped during a menubar-hidden transient; drained on next visible call.
     private var pendingContentSize: NSSize?
 
     // MARK: - Init
@@ -111,29 +118,23 @@ public final class MBKPopoverController: NSObject {
     private func openPopover() {
         guard let button = statusItem.button else { return }
 
-        // Pre-size to fittingSize before show() so AppKit places window at
-        // correct width from the start.
         let fitting = hostingController.view.fittingSize
         if fitting.width > 0, fitting.height > 0 {
             popover.contentSize = fitting
             mbkLog("PopoverController", "openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
         }
         pendingContentSize = nil
+        // Reset chrome cache on each open so it is measured fresh from the
+        // new window AppKit creates.
+        cachedChromeLeft = nil
 
-        showPopoverAnchored(to: button)
-        NSApp.activate(ignoringOtherApps: true)
-        mbkLog("PopoverController", "popover shown")
-        startEventMonitor()
-    }
-
-    /// Calls `popover.show(relativeTo:of:preferredEdge:)` with a 1pt rect at
-    /// button midX. Used both on initial open and after contentSize writes to
-    /// re-anchor AppKit's arrow geometry.
-    private func showPopoverAnchored(to button: NSStatusBarButton) {
         let midX = button.bounds.midX
         let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
                                 width: 1, height: button.bounds.height)
         popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
+        NSApp.activate(ignoringOtherApps: true)
+        mbkLog("PopoverController", "popover shown")
+        startEventMonitor()
     }
 
     private func setButtonHighlight(_ on: Bool) {
@@ -167,14 +168,13 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
-    /// Writes a new contentSize to the popover and re-anchors the arrow.
+    /// Writes a new contentSize and repositions the window so the arrow stays
+    /// centered over the status item button.
     ///
-    /// Skips when auto-hide menubar is animating (buttonY > screenH).
-    /// Note: buttonY == screenH is the VISIBLE boundary — do NOT skip it.
-    ///
-    /// When skipped, stores size as pendingContentSize. On the next visible
-    /// call, drains it and forces a write+re-anchor even if the size appears
-    /// unchanged (the popover geometry is stale from the skip).
+    /// Positioning math:
+    ///   chromeLeft = content view's minX inside the popover window (= left shadow/border width)
+    ///   arrow is at content center = pw.minX + chromeLeft + preferred.width/2
+    ///   to put arrow over buttonMidX:  targetX = buttonMidX - chromeLeft - preferred.width/2
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -184,8 +184,6 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        // Auto-hide menubar guard.
-        // Use > not >=: buttonY==screenH is visible (button flush with top edge).
         let buttonY = buttonWin.frame.origin.y
         let resolvedScreen = buttonWin.screen ?? NSScreen.main
         let screenH = resolvedScreen?.frame.height ?? CGFloat.infinity
@@ -201,9 +199,6 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        // Drain any pending size from a skipped cycle.
-        // forceReanchor=true bypasses the size-unchanged guard so the popover
-        // geometry is corrected even if preferred already matches contentSize.
         let forceReanchor: Bool
         if let pending = pendingContentSize {
             pendingContentSize = nil
@@ -221,15 +216,47 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
+        guard let pw = popover.contentViewController?.view.window,
+              let screen = resolvedScreen else {
+            popover.contentSize = preferred
+            mbkLog("PopoverController", "applyContentSize — written (no screen/window for reposition)")
+            return
+        }
+
+        // Measure chrome left inset from the live window before resizing.
+        // contentViewController.view is the content view; its frame origin
+        // in window coordinates equals the left chrome width.
+        let chromeLeft: CGFloat
+        if let cached = cachedChromeLeft {
+            chromeLeft = cached
+        } else {
+            let contentViewMinX = popover.contentViewController!.view.frame.minX
+            chromeLeft = contentViewMinX
+            cachedChromeLeft = chromeLeft
+            mbkLog("PopoverController", "applyContentSize — measured chromeLeft=\(chromeLeft)")
+        }
+
+        let buttonMidX = buttonWin.frame.minX + button.frame.midX
+
         mbkLog("PopoverController",
                "applyContentSize — WRITING (\(preferred.width),\(preferred.height)) "
-               + "forceReanchor=\(forceReanchor) "
+               + "forceReanchor=\(forceReanchor) buttonMidX=\(buttonMidX) chromeLeft=\(chromeLeft) "
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
 
         popover.contentSize = preferred
-        showPopoverAnchored(to: button)
 
-        mbkLog("PopoverController", "applyContentSize — done")
+        // Arrow is at content view center in screen space.
+        // targetX places the window so that center lands on buttonMidX.
+        let targetX = max(
+            screen.visibleFrame.minX,
+            min(buttonMidX - chromeLeft - preferred.width / 2,
+                screen.visibleFrame.maxX - pw.frame.width)
+        )
+        pw.setFrameOrigin(NSPoint(x: targetX, y: pw.frame.origin.y))
+
+        mbkLog("PopoverController",
+               "applyContentSize — done targetX=\(targetX) "
+               + "popoverWin=(\(pw.frame.origin.x),\(pw.frame.origin.y),\(pw.frame.width),\(pw.frame.height))")
     }
 
     // MARK: - Workspace observer
@@ -308,6 +335,7 @@ extension MBKPopoverController: NSPopoverDelegate {
         stopEventMonitor()
         overlayGate.hasActiveOverlay = false
         pendingContentSize = nil
+        cachedChromeLeft = nil
         mbkLog("PopoverController", "overlay gate reset on close")
     }
 }
