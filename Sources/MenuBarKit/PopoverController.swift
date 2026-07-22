@@ -1,5 +1,44 @@
 // PopoverController.swift
 // MenuBarKit
+//
+// Owns the full NSPopover + NSStatusItem lifecycle for a macOS menu-bar app.
+// Zero knowledge of the host app's views or state — all app-specific behaviour
+// is injected via closures at configuration time.
+//
+// ARROW CENTERING:
+//   NSPopover only centers its box around positioningRect ONCE, at show()
+//   time. Mutating contentSize alone on an already-visible popover does NOT
+//   re-trigger that centering — the box just grows/shrinks from a fixed
+//   edge, desyncing visibly from the arrow.
+//
+//   FIX (current): after setting popover.contentSize, compensate for
+//   AppKit's grow-from-edge default by shifting the window origin by the
+//   size delta — NOT by recomputing origin from scratch:
+//     - dx = (newWidth - oldWidth) / 2  → shift origin.x left by dx
+//       so window.midX stays pinned to the same screen position.
+//     - dy = newHeight - oldHeight      → shift origin.y down by dy
+//       so window.maxY stays pinned (top edge stays touching the arrow).
+//   This works entirely in window-frame space and never mixes content
+//   size with chrome dimensions.
+//
+//   ❌ PRIOR ATTEMPT: set frame.size = contentSize, then recomputed
+//      frame.origin.x = anchorX - contentSize.width / 2. Wrong because
+//      anchorX = window.frame.midX includes chrome (shadow/border)
+//      but contentSize does not — mixing the two spaces shifted the
+//      window ~100pt left, placing it at the screen edge.
+//
+//   ❌ EARLIER ATTEMPT: re-queried button screen coords on every resize.
+//      button.minY is NOT stable across sessions: macOS auto-hides the
+//      menu bar, changing button screen-Y between open/close cycles.
+//
+//   ❌ EARLIEST ATTEMPT: close() + show() on width change.
+//      Two WindowServer frames — visible lateral jump.
+//
+//   ⚠️  CRITICAL GOTCHA — SIZE OBSERVATION: observe from SwiftUI only.
+//      NSView KVO / frameDidChangeNotification silently fail inside
+//      NSPopover. Use GeometryReader + onChange (see setupPopover()).
+//
+//   ⚠️  NEVER call show() with a degenerate positioningRect.
 
 import AppKit
 import SwiftUI
@@ -10,7 +49,6 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Configuration
 
     private let overlayGate: MBKOverlayGate
-    private let rootView: AnyView
     private let symbolName: String
     private let contentSize: NSSize
 
@@ -19,7 +57,6 @@ public final class MBKPopoverController: NSObject {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var hostingController: NSHostingController<AnyView>!
-    private var sizeObservation: NSKeyValueObservation?
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
@@ -32,11 +69,13 @@ public final class MBKPopoverController: NSObject {
         symbolName: String = "menubar.rectangle",
         contentSize: NSSize = NSSize(width: 320, height: 300)
     ) {
-        self.rootView = AnyView(rootView)
         self.overlayGate = overlayGate
         self.symbolName = symbolName
         self.contentSize = contentSize
+        self.pendingRootView = AnyView(rootView)
     }
+
+    private var pendingRootView: AnyView
 
     // MARK: - Setup
 
@@ -73,21 +112,28 @@ public final class MBKPopoverController: NSObject {
     private func openPopover() {
         guard let button = statusItem.button else { return }
 
-        // Pre-size to fittingSize so AppKit places the window at the correct
-        // width immediately on show().
         let fitting = hostingController.view.fittingSize
         if fitting.width > 0, fitting.height > 0 {
             popover.contentSize = fitting
             mbkLog("PopoverController", "openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
         }
 
-        let midX = button.bounds.midX
-        let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
-                                width: 1, height: button.bounds.height)
-        popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
+        guard let rect = positioningRect(for: button) else { return }
+        popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
         mbkLog("PopoverController", "popover shown")
         startEventMonitor()
+    }
+
+    /// Returns a fresh positioningRect derived from the button's CURRENT
+    /// bounds, or nil if those bounds are degenerate (zero width/height).
+    private func positioningRect(for button: NSStatusBarButton) -> NSRect? {
+        let bounds = button.bounds
+        guard bounds.width > 0, bounds.height > 0 else {
+            mbkLog("PopoverController", "positioningRect — skipped: button.bounds is degenerate \(bounds)")
+            return nil
+        }
+        return NSRect(x: bounds.midX - 0.5, y: bounds.minY, width: 1, height: bounds.height)
     }
 
     private func setButtonHighlight(_ on: Bool) {
@@ -97,81 +143,70 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Popover setup
 
     private func setupPopover() {
-        hostingController = NSHostingController(rootView: rootView)
+        let wrapped = pendingRootView
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onChange(of: geo.size) { [weak self] _, newSize in
+                            self?.applyContentSize(newSize)
+                        }
+                        .onAppear { [weak self] in
+                            self?.applyContentSize(geo.size)
+                        }
+                }
+            )
+        hostingController = NSHostingController(rootView: AnyView(wrapped))
+        hostingController.sizingOptions = []
         popover = NSPopover()
         popover.contentViewController = hostingController
         popover.contentSize = contentSize
         popover.animates = false
         popover.behavior = .applicationDefined
         popover.delegate = self
-        setupSizeObserver()
     }
 
-    // MARK: - Size observer
-
-    private func setupSizeObserver() {
-        sizeObservation = hostingController.view.observe(
-            \.frame, options: [.new]
-        ) { [weak self] _, _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                let settled = self.hostingController.view.fittingSize
-                self.applyContentSize(settled)
-            }
-        }
-    }
-
-    /// Writes the new contentSize and corrects window x AFTER the write only.
+    /// Applies a new preferred content size.
     ///
-    /// IMPORTANT: Do not reposition before the write. By the time our frame
-    /// observer fires, AppKit auto-layout has already committed the new window
-    /// width into pw.frame.width even though popover.contentSize is stale.
-    /// Reading pw.frame.width pre-write gives the new width, not the current
-    /// one — computing idealX from it moves the window to the wrong x for the
-    /// still-old chrome size, breaking centering. Post-write, pw.frame.width
-    /// is final and the correction is exact.
-    private func applyContentSize(_ preferred: NSSize) {
-        guard popover.isShown else { return }
+    /// Sets popover.contentSize, then corrects the window origin by the
+    /// size delta so midX and maxY stay pinned — compensating for AppKit's
+    /// default grow-from-bottom-left behaviour without mixing content and
+    /// chrome coordinate spaces.
+    private func applyContentSize(_ preferred: CGSize) {
         guard preferred.width > 0, preferred.height > 0 else { return }
         let currentSize = popover.contentSize
-        guard let button = statusItem.button,
-              let buttonWin = button.window else {
-            mbkLog("PopoverController", "applyContentSize — no button/window, skipping")
-            return
-        }
-        let buttonY = buttonWin.frame.origin.y
-        let screenH = buttonWin.screen?.frame.height ?? -1
-        guard screenH >= 0 && buttonY < screenH else {
-            mbkLog("PopoverController", "applyContentSize — menu bar hidden, skipping")
-            return
-        }
         guard abs(currentSize.width - preferred.width) > 1
-                || abs(currentSize.height - preferred.height) > 1 else { return }
-
-        guard let screen = buttonWin.screen,
-              let pw = popover.contentViewController?.view.window else {
-            popover.contentSize = preferred
+           || abs(currentSize.height - preferred.height) > 1 else {
+            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
             return
         }
 
-        let buttonMidX = buttonWin.frame.minX + button.frame.midX
+        guard popover.isShown, let window = hostingController.view.window else {
+            popover.contentSize = preferred
+            mbkLog("PopoverController", "applyContentSize — not shown, recorded (\(preferred.width),\(preferred.height))")
+            return
+        }
+
+        // Capture current window origin BEFORE mutating contentSize.
+        // AppKit repositions the window as a side-effect of contentSize change,
+        // so we must read first, then write, then correct.
+        let oldFrame = window.frame
+        let dw = preferred.width - currentSize.width
+        let dh = preferred.height - currentSize.height
 
         mbkLog("PopoverController",
-               "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
-               + "prev=(\(currentSize.width),\(currentSize.height))")
+               "applyContentSize — (\(currentSize.width),\(currentSize.height))→"
+               + "(\(preferred.width),\(preferred.height)) dw=\(dw) dh=\(dh)")
+
         popover.contentSize = preferred
 
-        // Correct x after write — pw.frame.width is now the final chrome width.
-        let winW = pw.frame.width
-        let idealX = buttonMidX - winW / 2
-        let clampedX = max(screen.visibleFrame.minX, min(idealX, screen.visibleFrame.maxX - winW))
-        let curX = pw.frame.origin.x
-        if abs(curX - clampedX) > 1 {
-            mbkLog("PopoverController",
-                   "applyContentSize — reposition x \(curX) → \(clampedX) "
-                   + "(buttonMidX=\(buttonMidX) winW=\(winW))")
-            pw.setFrameOrigin(NSPoint(x: clampedX, y: pw.frame.origin.y))
-        }
+        // Shift origin to keep midX and maxY fixed:
+        //   origin.x -= dw/2  → window grows/shrinks symmetrically around center
+        //   origin.y -= dh    → window grows/shrinks downward, top edge stays put
+        var newOrigin = oldFrame.origin
+        newOrigin.x -= dw / 2
+        newOrigin.y -= dh
+        window.setFrameOrigin(newOrigin)
+        mbkLog("PopoverController", "applyContentSize — origin set to \(newOrigin)")
     }
 
     // MARK: - Workspace observer

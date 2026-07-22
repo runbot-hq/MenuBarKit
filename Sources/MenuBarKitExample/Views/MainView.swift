@@ -4,6 +4,11 @@
 import SwiftUI
 
 /// Landing view shown on first popover open. Navigates to `SettingsView`.
+///
+/// Intentionally uses a DIFFERENT width (260) than SettingsView (320) to
+/// exercise PopoverController's dynamic-width arrow centering fix (see
+/// positioningRect re-assignment, guarded against degenerate button bounds,
+/// in applyContentSize()).
 struct MainView: View {
     /// App state injected from the environment.
     @Environment(AppState.self) private var appState

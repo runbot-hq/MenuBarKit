@@ -3,41 +3,45 @@
 //
 // Exercises all three scenarios:
 //
-//   Scenario 1 — Sheet anchors + blocks outside-click dismiss:
-//     "Open sheet" presents via .mbkSheet(), which wires the SwiftUI sheet
-//     window as a child of the popover window and gates dismiss.
+//   Scenario 1 — Sheet anchors + blocks outside-click dismiss
+//   Scenario 2 — File picker from popover level
+//   Scenario 3 — Alert from popover level
 //
-//   Scenario 2 — File picker from popover level:
-//     "Pick folder (popover)" calls mbkOpenFilePicker(target: .popover).
-//
-//   Scenario 3 — Alert from popover level:
-//     "Show alert" sets AppState.showAlert = true.
-//     .mbkAlert wraps .alert() and manages the overlay gate automatically,
-//     preventing the outside-click monitor and workspace observer from
-//     closing the popover while the alert is on screen.
+// Width is now driven by content (no fixed .frame(width:)) so the popover
+// resizes horizontally based on whatever is visible. The "Show wide row"
+// toggle reveals a wide element, forcing a horizontal resize — this
+// exercises the delta-based centering fix with UI-driven width changes.
 
 import MenuBarKit
 import SwiftUI
 
-/// Settings view that exercises the sheet-anchoring, file-picker, and alert scenarios.
+/// Settings view that exercises the sheet-anchoring, file-picker, alert,
+/// and content-driven width-change scenarios.
 struct SettingsView: View {
-    /// App state injected from the environment.
     @Environment(AppState.self) private var appState
-    /// Overlay gate injected from the environment.
-    // TODO(#2): remove overlayGate once MBK modifiers resolve it from @Environment internally.
     @Environment(MBKOverlayGate.self) private var overlayGate
-    /// Controls whether the anchored sheet is presented.
     @State private var showSheet = false
+    @State private var showWideRow = false
 
-    /// The root view hierarchy for the settings screen.
     var body: some View {
         @Bindable var appState = appState
-        VStack(spacing: 12) {
-            Text("Settings").font(.headline)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Settings").font(.headline).frame(maxWidth: .infinity, alignment: .center)
+            Divider()
+
+            // Width driver: toggle reveals a wide fixed-width label.
+            // The VStack will widen to fit it, driving a horizontal resize.
+            Toggle("Show wide row", isOn: $showWideRow)
+            if showWideRow {
+                Text("← this row is intentionally wide to drive a horizontal resize →")
+                    .font(.system(size: 11, design: .monospaced))
+                    .fixedSize()          // prevent wrapping — must report full intrinsic width
+                    .foregroundStyle(.secondary)
+            }
+
             Divider()
 
             // Scenario 1
-            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
             Button("Open sheet") { showSheet = true }
                 .mbkSheet(isPresented: $showSheet, overlayGate: overlayGate) {
                     SheetView()
@@ -46,7 +50,6 @@ struct SettingsView: View {
                 }
 
             // Scenario 2
-            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
             Button("Pick folder (popover)") {
                 mbkOpenFilePicker(target: .popover, overlayGate: overlayGate) { url in
                     appState.pickedURL = url
@@ -59,7 +62,6 @@ struct SettingsView: View {
             }
 
             // Scenario 3
-            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
             GroupBox("Alert from popover") {
                 Button("Show alert") { appState.showAlert = true }
                 Text("Alert should appear. Popover stays alive.")
@@ -77,9 +79,10 @@ struct SettingsView: View {
 
             Divider()
             Button("← Back") { appState.route = .main }
+                .frame(maxWidth: .infinity, alignment: .center)
         }
         .padding(16)
-        .frame(width: 320)
+        .fixedSize()   // let VStack report its intrinsic size to fittingSize
         .onAppear    { print("[SettingsView] onAppear") }
         .onDisappear { print("[SettingsView] onDisappear") }
     }
