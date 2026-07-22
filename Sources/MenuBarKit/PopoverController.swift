@@ -20,6 +20,19 @@
 //     close+reshow cycle, so there is no possible intermediate frame for
 //     the window server to flush.
 // This removes the entire class of bug rather than patching around it.
+//
+// SIZE-SOURCE DIRECTION — do not set hostingView.autoresizingMask:
+//   hostingView (the NSHostingView wrapping SwiftUI content) must be the
+//   SOURCE of size, driven by its own intrinsic fittingSize, never the
+//   DESTINATION of an autoresizing stretch from its parent. An earlier
+//   version set hostingView.autoresizingMask = [.width, .height] and
+//   forced hostingView.frame = arrowView.bodyRect on every layout pass —
+//   that inverts the direction: the hosting view always stretched to
+//   match whatever size the window/arrowView already was, so it could
+//   never grow or shrink on its own, and the app appeared permanently
+//   fixed-size. hostingView.frame must always be set from
+//   hostingView.fittingSize (SwiftUI's real desired size), and the window
+//   must be resized to match THAT — never the other way around.
 
 import AppKit
 import SwiftUI
@@ -45,6 +58,7 @@ public final class MBKPopoverController: NSObject {
     private var isShown = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var frameChangeObserver: NSObjectProtocol?
 
     private let arrowHeight: CGFloat = 10
 
@@ -98,7 +112,12 @@ public final class MBKPopoverController: NSObject {
 
     private func setupWindow() {
         hostingView = NSHostingView(rootView: rootView)
+        // Deliberately NO autoresizingMask here. hostingView must size
+        // itself from SwiftUI's intrinsic content (fittingSize) and stay
+        // the source of truth for layout — see SIZE-SOURCE DIRECTION above.
+
         arrowView = MBKArrowView()
+        arrowView.autoresizingMask = [.width, .height]
 
         // Use NSPanel with .nonactivatingPanel styleMask, NOT plain
         // .borderless NSWindow. AnchoredSheet.swift locates "the popover
@@ -122,11 +141,9 @@ public final class MBKPopoverController: NSObject {
         win.becomesKeyOnlyIfNeeded = true
 
         arrowView.frame = NSRect(origin: .zero, size: win.frame.size)
-        arrowView.autoresizingMask = [.width, .height]
         win.contentView = arrowView
 
-        hostingView.frame = arrowView.bodyRect
-        hostingView.autoresizingMask = [.width, .height]
+        hostingView.frame = NSRect(origin: .zero, size: hostingView.fittingSize)
         arrowView.addSubview(hostingView)
 
         window = win
@@ -160,22 +177,29 @@ public final class MBKPopoverController: NSObject {
         return (frame, arrowX)
     }
 
+    /// Applies a window frame + arrow position, and lays out arrowView /
+    /// hostingView to match. hostingView is always sized from `contentSize`
+    /// (the caller-supplied SwiftUI-desired size), positioned at the
+    /// bottom of the arrow strip — never stretched by autoresizing.
+    private func layout(frame: NSRect, arrowX: CGFloat, contentSize: NSSize) {
+        arrowView.frame = NSRect(origin: .zero, size: frame.size)
+        hostingView.frame = NSRect(x: 0, y: 0, width: contentSize.width, height: contentSize.height)
+        arrowView.arrowXInWindow = arrowX
+        window.setFrame(frame, display: true)
+    }
+
     // MARK: - Open / close
 
     private func openWindow() {
-        guard let button = statusItem.button else { return }
+        guard statusItem.button != nil else { return }
         let fitting = hostingView.fittingSize
         let size = (fitting.width > 0 && fitting.height > 0) ? fitting : initialContentSize
 
         guard let (frame, arrowX) = computeFrame(for: size) else { return }
+        layout(frame: frame, arrowX: arrowX, contentSize: size)
 
-        arrowView.frame = NSRect(origin: .zero, size: frame.size)
-        hostingView.frame = arrowView.bodyRect
-        arrowView.arrowXInWindow = arrowX
-
-        window.setFrame(frame, display: true)
         window.orderFrontRegardless()
-        button.isHighlighted = true
+        statusItem.button?.isHighlighted = true
 
         isShown = true
         NSApp.activate(ignoringOtherApps: true)
@@ -197,7 +221,34 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Size observer
 
     private func setupSizeObserver() {
+        // Observe hostingView.fittingSize indirectly via its frame KVO.
+        // Because hostingView.frame is only ever set by US, from
+        // hostingView.fittingSize (never stretched by an autoresizing
+        // mask), a genuine SwiftUI content-size change shows up as
+        // fittingSize changing even though frame hasn't been touched yet.
+        // Poll fittingSize on each frame-KVO tick AND schedule a
+        // fittingSize check whenever SwiftUI invalidates layout via
+        // NSView's own displayIfNeeded cycle, using layout() as the
+        // single funnel that keeps hostingView's frame equal to its
+        // current fittingSize.
         sizeObservation = hostingView.observe(\.frame, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.applyContentSize(self.hostingView.fittingSize)
+            }
+        }
+        // fittingSize can change without hostingView.frame changing first
+        // (e.g. a SwiftUI child view's intrinsic size changes but the
+        // hosting view's own frame hasn't been resized yet — that's
+        // exactly the resize we need to react to). Layer-backed views
+        // fire needsLayout/needsDisplay on such changes, so hook the
+        // hosting view's layer to catch it as well.
+        hostingView.postsFrameChangedNotifications = true
+        frameChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: hostingView,
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.applyContentSize(self.hostingView.fittingSize)
@@ -223,7 +274,7 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        let currentSize = NSSize(width: window.frame.width, height: window.frame.height - arrowHeight)
+        let currentSize = hostingView.frame.size
         guard abs(currentSize.width - preferred.width) > 1
                 || abs(currentSize.height - preferred.height) > 1 else { return }
 
@@ -233,10 +284,7 @@ public final class MBKPopoverController: NSObject {
                "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
                + "prev=(\(currentSize.width),\(currentSize.height))")
 
-        arrowView.frame = NSRect(origin: .zero, size: frame.size)
-        hostingView.frame = arrowView.bodyRect
-        arrowView.arrowXInWindow = arrowX
-        window.setFrame(frame, display: true)
+        layout(frame: frame, arrowX: arrowX, contentSize: preferred)
 
         mbkLog("PopoverController", "applyContentSize — resized in place, arrow re-centered, no close/reshow")
     }
@@ -295,6 +343,9 @@ public final class MBKPopoverController: NSObject {
         }
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
+        }
+        if let frameChangeObserver {
+            NotificationCenter.default.removeObserver(frameChangeObserver)
         }
     }
 }
