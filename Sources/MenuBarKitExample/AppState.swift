@@ -26,19 +26,13 @@ enum Route: Equatable {
 @MainActor
 final class AppState {
     /// Currently displayed route.
-    var route: Route = .main {
-        didSet { print("[AppState] route: \(oldValue) → \(self.route)") }
-    }
+    var route: Route = .main
     /// URL selected by the file picker opened from SettingsView (popover context). nil until first pick.
     var pickedURL: URL?
     /// URL selected by the file picker opened from SheetView (sheet context). nil until first pick.
     var sheetPickedURL: URL?
     /// Controls the error alert presented from SettingsView (popover level).
-    var showAlert: Bool = false {
-        didSet { print("[AppState] showAlert: \(oldValue) → \(self.showAlert)") }
-    }
+    var showAlert: Bool = false
     /// Controls the error alert presented from inside SheetView.
-    var showSheetAlert: Bool = false {
-        didSet { print("[AppState] showSheetAlert: \(oldValue) → \(self.showSheetAlert)") }
-    }
+    var showSheetAlert: Bool = false
 }
