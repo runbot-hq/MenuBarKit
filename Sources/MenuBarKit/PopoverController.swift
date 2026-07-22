@@ -4,12 +4,12 @@
 // Resize strategy
 // ───────────────
 // After the initial show() AppKit has finalised all geometry. We capture:
-//   topEdge        — pw.frame.maxY  (constant: just below menu bar)
+//   topEdge          — pw.frame.maxY  (constant: just below menu bar)
 //   buttonMidXScreen — button centre in screen coords (constant per open)
-//   chromeDelta    — pw.frame.size − contentSize (arrow+border, constant)
+//   chromeDelta      — pw.frame.size − contentSize (arrow+border, constant)
 //
 // On every subsequent resize we compute the new window rect purely from
-// those captured values + the new contentSize, before writing anything:
+// those captured values + the new contentSize, BEFORE writing anything:
 //   winW = newContent.width  + chromeDelta.width
 //   winH = newContent.height + chromeDelta.height
 //   x    = buttonMidXScreen  - winW / 2
@@ -17,6 +17,10 @@
 //
 // Then: write contentSize, write setFrameOrigin.
 // No show() call, no read-after-write race with AppKit layout.
+//
+// KEY: button.frame is in SUPERVIEW coords, not window coords.
+// Always use button.convert(point, to: nil) → buttonWin.convertPoint(toScreen:)
+// to get true screen x of the button centre.
 
 import AppKit
 import Combine
@@ -37,7 +41,7 @@ public final class MBKPopoverController: NSObject {
 
     private var buttonMidXScreen: CGFloat = 0
     private var popoverTopEdge: CGFloat = 0
-    /// pw.frame.size − popover.contentSize after initial show(). Constant.
+    /// pw.frame.size − popover.contentSize right after initial show(). Constant.
     private var chromeDelta: NSSize = .zero
 
     // MARK: - Owned objects
@@ -113,15 +117,22 @@ public final class MBKPopoverController: NSObject {
         if let pw = popover.contentViewController?.view.window,
            let buttonWin = button.window {
             popoverTopEdge = pw.frame.maxY
-            let mid = NSPoint(x: button.frame.midX, y: button.frame.midY)
-            buttonMidXScreen = buttonWin.convertPoint(toScreen: mid).x
+
+            // CORRECT: convert button-local midpoint → window coords → screen coords.
+            // button.frame is in superview coords and must NOT be used directly.
+            let midInWindow = button.convert(
+                NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+            buttonMidXScreen = buttonWin.convertPoint(toScreen: midInWindow).x
+
             let cs = popover.contentSize
             chromeDelta = NSSize(
                 width:  pw.frame.width  - cs.width,
                 height: pw.frame.height - cs.height
             )
             mbkLog("PopoverController",
-                   "anchor — topEdge=\(popoverTopEdge) midX=\(buttonMidXScreen) chrome=(\(chromeDelta.width),\(chromeDelta.height))")
+                   "anchor — topEdge=\(popoverTopEdge) buttonMidX=\(buttonMidXScreen) " +
+                   "chrome=(\(chromeDelta.width),\(chromeDelta.height)) " +
+                   "pwFrame=\(pw.frame)")
         }
         mbkLog("PopoverController", "popover shown")
         startEventMonitor()
@@ -166,24 +177,27 @@ public final class MBKPopoverController: NSObject {
         let current = popover.contentSize
         guard abs(current.width - size.width) > 1 || abs(current.height - size.height) > 1 else { return }
 
-        // Compute new window rect BEFORE writing contentSize.
-        // chromeDelta is constant, so:
+        // Compute new window rect BEFORE writing contentSize — no AppKit reads after write.
         let winW = size.width  + chromeDelta.width
         let winH = size.height + chromeDelta.height
         let newX = buttonMidXScreen - winW / 2
         let newY = popoverTopEdge   - winH
 
         mbkLog("PopoverController",
-               "reshowWithSize — content=(\(size.width),\(size.height)) win=(\(winW),\(winH)) x=\(newX) y=\(newY)")
+               "reshowWithSize — content=(\(size.width),\(size.height)) " +
+               "win=(\(winW),\(winH)) origin=(\(newX),\(newY))")
 
         guard let pw = popover.contentViewController?.view.window else { return }
         popover.contentSize = size
         pw.setFrameOrigin(NSPoint(x: newX, y: newY))
+
+        mbkLog("PopoverController", "reshowWithSize — pw.frame after=\(pw.frame)")
     }
 
     // MARK: - Helpers
 
     private func centerRect(for button: NSButton) -> NSRect {
+        // A 1pt-wide rect centred on the button, used as the positioning anchor.
         let midX = button.bounds.midX
         return NSRect(x: midX - 0.5, y: button.bounds.minY, width: 1, height: button.bounds.height)
     }
