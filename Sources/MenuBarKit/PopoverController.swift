@@ -146,16 +146,21 @@ public final class MBKPopoverController: NSObject {
     ///     reshow makes AppKit run its own in-place resize/relayout on the
     ///     live window immediately, which is itself a visible side-jump
     ///     that happens before we ever get to close+reshow.
+    ///   - Even with correct close → resize-while-hidden → reshow ordering,
+    ///     performClose() and show() are two SEPARATE window-server
+    ///     transactions. The window server is free to flush the
+    ///     intermediate "closed" state to the display before the
+    ///     "reshown" state arrives, and that stray intermediate flush is
+    ///     itself visible as a side-jump.
     ///
-    /// WHY CLOSE-THEN-RESIZE-THEN-RESHOW WORKS:
-    ///   Closing first means the contentSize write applies to a hidden
-    ///   window (no visible relayout), and the subsequent
-    ///   show(relativeTo:of:preferredEdge:) performs a single, fresh AppKit
-    ///   layout pass where window frame and arrow tip are computed together
-    ///   from positioningRect and contentSize, exactly as on first open.
-    ///   Since popover.animates = false, close+reshow is visually
-    ///   instantaneous (no flicker), and this guarantees the window and
-    ///   arrow are always consistent with no in-between visible jump.
+    /// WHY THIS WORKS:
+    ///   The entire close → resize → reshow sequence is bracketed with
+    ///   NSDisableScreenUpdates()/NSEnableScreenUpdates(), which forces the
+    ///   window server to treat it as a single atomic redraw. Only the
+    ///   final, correctly anchored frame (window + arrow computed together
+    ///   via show(relativeTo:of:preferredEdge:), exactly as on first open)
+    ///   is ever actually flushed to the screen — no intermediate closed
+    ///   or stale-size frame is ever visible.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -185,17 +190,21 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        // Close FIRST, then write contentSize, then reshow. Writing
-        // contentSize while the popover is still visible makes AppKit run
-        // its own in-place resize/relayout on the live window immediately
-        // — that in-place resize is itself a visible side-jump, occurring
-        // before we ever get to close+reshow. Closing first means the
-        // contentSize write applies to a hidden window, so nothing jumps;
-        // the subsequent show() then does a single, fresh, correctly
-        // anchored layout pass at the new size. Suppress the delegate's
-        // side effects (highlight/eventMonitor/overlayGate reset) since
-        // this isn't a user-driven dismiss.
+        // Close, resize, and reshow, but wrap the whole sequence between
+        // NSDisableScreenUpdates()/NSEnableScreenUpdates(). Without this,
+        // performClose() and show() are two SEPARATE window-server
+        // transactions: even though our Swift call order is correct and
+        // the resize happens while hidden, the window server is still free
+        // to composite/flush the "closed" state to the display before the
+        // "reshown" state arrives, and that intermediate flush is exactly
+        // what is visible as a side-jump. Bracketing the sequence forces
+        // the window server to treat close+resize+reshow as a single
+        // atomic redraw, so only the final, correctly anchored frame is
+        // ever actually flushed to screen. Suppress the delegate's side
+        // effects (highlight/eventMonitor/overlayGate reset) since this
+        // isn't a user-driven dismiss.
         isReanchoring = true
+        NSDisableScreenUpdates()
         popover.performClose(nil)
 
         mbkLog("PopoverController",
@@ -207,6 +216,7 @@ public final class MBKPopoverController: NSObject {
         let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
                                 width: 1, height: button.bounds.height)
         popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
+        NSEnableScreenUpdates()
         isReanchoring = false
         mbkLog("PopoverController", "applyContentSize — re-shown at new size, arrow re-centered")
     }
