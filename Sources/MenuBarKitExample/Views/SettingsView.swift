@@ -79,8 +79,8 @@ struct SettingsView: View {
             Button("← Back") { appState.route = .main }
         }
         .padding(16)
-        .frame(minWidth: 260)
-        .onAppear   { print("[SettingsView] onAppear") }
+        .frame(width: 320)
+        .onAppear    { print("[SettingsView] onAppear") }
         .onDisappear { print("[SettingsView] onDisappear") }
     }
 }

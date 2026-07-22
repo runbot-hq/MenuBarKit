@@ -15,8 +15,8 @@ struct MainView: View {
                 .buttonStyle(.borderedProminent)
         }
         .padding(16)
-        .frame(minWidth: 260)
-        .onAppear   { print("[MainView] onAppear") }
+        .frame(width: 260)
+        .onAppear    { print("[MainView] onAppear") }
         .onDisappear { print("[MainView] onDisappear") }
     }
 }
