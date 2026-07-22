@@ -241,7 +241,8 @@ public final class MBKPopoverController: NSObject {
             return
         }
         guard let button = statusItem.button,
-              let buttonWin = button.window else {
+              let buttonWin = button.window,
+              let pw = popover.contentViewController?.view.window else {
             mbkLog("PopoverController", "applyContentSize — no button/window, skipping")
             return
         }
@@ -250,10 +251,6 @@ public final class MBKPopoverController: NSObject {
         let isMenuBarHidden = screenH < 0 || buttonY >= screenH
         guard !isMenuBarHidden else {
             mbkLog("PopoverController", "applyContentSize — SKIP: isMenuBarHidden")
-            return
-        }
-        guard let pw = popover.contentViewController?.view.window else {
-            popover.contentSize = preferred
             return
         }
 
