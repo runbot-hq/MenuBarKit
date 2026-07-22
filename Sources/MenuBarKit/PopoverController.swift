@@ -5,17 +5,18 @@
 // Zero knowledge of the host app's views or state — all app-specific behaviour
 // is injected via closures at configuration time.
 //
-// ARROW CENTERING ON RESIZE (applyContentSize):
-//
+// ARROW CENTERING:
 //   The arrow tip is at the horizontal center of the content view in screen
-//   space. The window is wider than the content view by chrome (shadow+border).
-//   chromeLeft = content view's minX in window coordinates.
+//   space. windowWidth - contentWidth = 26pt of chrome, symmetric, so
+//   chromeLeft = 13pt always. We do not measure it from the live window
+//   because the content view frame may not have updated yet after a
+//   contentSize write.
 //
-//   chromeLeft MUST be measured AFTER writing contentSize because it varies
-//   with window width (chrome is asymmetric — left ≠ right shadow).
-//   It must NOT be cached across different content sizes.
-//
-//     targetX = buttonMidX - chromeLeft - preferred.width / 2
+//   repositionPopoverWindow(preferred:) sets the window X so that
+//   pw.minX + 13 + preferred.width/2 == buttonMidX.
+//   It is called:
+//     1. After show() in openPopover — fixes AppKit's initial placement.
+//     2. After every contentSize write in applyContentSize.
 //
 // SIDE-JUMP UNDER AUTO-HIDE MENUBAR:
 //   buttonY > screenH (strictly) = hidden. buttonY == screenH = visible.
@@ -23,6 +24,9 @@
 
 import AppKit
 import SwiftUI
+
+/// Left chrome inset: (windowWidth - contentWidth) / 2 = 13pt, constant.
+private let kChromeLeft: CGFloat = 13
 
 @MainActor
 public final class MBKPopoverController: NSObject {
@@ -107,9 +111,36 @@ public final class MBKPopoverController: NSObject {
         let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
                                 width: 1, height: button.bounds.height)
         popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
+
+        // Correct AppKit's initial placement immediately after show().
+        // applyContentSize fires as no-op on open (size unchanged) so without
+        // this call the arrow position is whatever AppKit chose.
+        repositionPopoverWindow(preferred: popover.contentSize, button: button)
+
         NSApp.activate(ignoringOtherApps: true)
         mbkLog("PopoverController", "popover shown")
         startEventMonitor()
+    }
+
+    /// Moves the popover window so the arrow (content view horizontal center)
+    /// lands exactly over the status item button's midX.
+    ///
+    /// chromeLeft is constant at 13pt (windowWidth - contentWidth = 26, symmetric).
+    private func repositionPopoverWindow(preferred: NSSize, button: NSStatusBarButton) {
+        guard let pw = popover.contentViewController?.view.window,
+              let buttonWin = button.window,
+              let screen = buttonWin.screen ?? NSScreen.main else { return }
+        let buttonMidX = buttonWin.frame.minX + button.frame.midX
+        let targetX = max(
+            screen.visibleFrame.minX,
+            min(buttonMidX - kChromeLeft - preferred.width / 2,
+                screen.visibleFrame.maxX - pw.frame.width)
+        )
+        pw.setFrameOrigin(NSPoint(x: targetX, y: pw.frame.origin.y))
+        mbkLog("PopoverController",
+               "repositionPopoverWindow — preferred.width=\(preferred.width) "
+               + "buttonMidX=\(buttonMidX) targetX=\(targetX) "
+               + "popoverWin=(\(pw.frame.origin.x),\(pw.frame.origin.y),\(pw.frame.width),\(pw.frame.height))")
     }
 
     private func setButtonHighlight(_ on: Bool) {
@@ -184,37 +215,15 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        guard let pw = popover.contentViewController?.view.window,
-              let screen = resolvedScreen else {
-            popover.contentSize = preferred
-            mbkLog("PopoverController", "applyContentSize — written (no screen/window for reposition)")
-            return
-        }
-
-        let buttonMidX = buttonWin.frame.minX + button.frame.midX
-
         mbkLog("PopoverController",
                "applyContentSize — WRITING (\(preferred.width),\(preferred.height)) "
-               + "forceReanchor=\(forceReanchor) buttonMidX=\(buttonMidX) "
+               + "forceReanchor=\(forceReanchor) "
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
 
-        // Write contentSize first so the window resizes.
         popover.contentSize = preferred
+        repositionPopoverWindow(preferred: preferred, button: button)
 
-        // Measure chromeLeft AFTER the write — it varies with window width
-        // (chrome is asymmetric) so it cannot be cached across different sizes.
-        let chromeLeft = popover.contentViewController!.view.frame.minX
-
-        let targetX = max(
-            screen.visibleFrame.minX,
-            min(buttonMidX - chromeLeft - preferred.width / 2,
-                screen.visibleFrame.maxX - pw.frame.width)
-        )
-        pw.setFrameOrigin(NSPoint(x: targetX, y: pw.frame.origin.y))
-
-        mbkLog("PopoverController",
-               "applyContentSize — done chromeLeft=\(chromeLeft) targetX=\(targetX) "
-               + "popoverWin=(\(pw.frame.origin.x),\(pw.frame.origin.y),\(pw.frame.width),\(pw.frame.height))")
+        mbkLog("PopoverController", "applyContentSize — done")
     }
 
     // MARK: - Workspace observer
