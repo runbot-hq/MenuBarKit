@@ -13,24 +13,28 @@
 //   - Implement popoverShouldClose via the MBKOverlayGate
 //   - Reset the overlay gate in popoverDidClose (safety net)
 //
-// ARROW CENTERING — setFrameOrigin from preferred.width on resize:
+// ARROW CENTERING — post-write setFrameOrigin on resize:
 //   On first open, show() is called with a 1pt positioningRect centred at
 //   button.bounds.midX. AppKit places the arrow correctly from the start.
 //
-//   On resize (applyContentSize), we write contentSize then immediately
-//   snap the window x via setFrameOrigin, computed from preferred.width
-//   (the value just written). Both happen back-to-back in the same runloop
-//   cycle so no intermediate frame is ever visible on screen.
+//   On resize (applyContentSize):
+//     1. Write contentSize.
+//     2. Read pw.frame.width — NOW reflects the new chrome-wrapped size.
+//     3. Compute targetX = buttonMidX - pw.frame.width / 2 (clamped).
+//     4. Call setFrameOrigin back-to-back with the write.
+//
+//   ❌ Do NOT compute targetX from preferred.width (content width). The
+//   popover chrome (arrow + border padding) makes pw.frame.width larger
+//   than the content. Using preferred.width shifts the window left by half
+//   the chrome width, placing the arrow off-center.
+//
+//   ❌ Do NOT read pw.frame.width BEFORE the contentSize write. Pre-write,
+//   AppKit may not yet have committed the new width — it may still hold the
+//   previous value on some layout paths.
 //
 //   ❌ Do NOT call show() inside applyContentSize. show() on an already-shown
 //   popover repositions the entire window from scratch in screen coordinates,
 //   causing a visible side-jump on every width change.
-//
-//   ❌ Do NOT compute targetX from pw.frame.width. By the time our KVO fires,
-//   AppKit may have already pre-resized pw to the new width, making
-//   pw.frame.width == preferred.width (no drift to correct). But on slower
-//   paths it may still hold the old width. preferred.width is the only
-//   value that is always correct at write time.
 //
 //   ❌ Do NOT call show() before writing contentSize — AppKit sizes the
 //   window at show() time. Wrong contentSize = wrong initial placement.
@@ -201,20 +205,25 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
-    /// Writes contentSize and snaps the window x to keep the arrow centred
+    /// Writes contentSize then snaps the window x to keep the arrow centred
     /// on the status item button.
     ///
-    /// targetX is computed from preferred.width — the value being written —
-    /// not pw.frame.width. By the time our KVO fires, AppKit may have already
-    /// pre-resized pw to the new width; pw.frame.width is unreliable.
-    /// preferred.width is always the correct final width at write time.
+    /// ORDER MATTERS:
+    ///   1. Write contentSize.
+    ///   2. Read pw.frame.width post-write — AppKit has now committed the
+    ///      new chrome-wrapped width. This is the only safe read point.
+    ///   3. Compute targetX = buttonMidX - chromeWidth / 2 (screen-clamped).
+    ///   4. setFrameOrigin — still in the same runloop cycle, so no
+    ///      intermediate mis-centred frame is ever visible.
     ///
-    /// contentSize and setFrameOrigin are written back-to-back in the same
-    /// runloop cycle so no intermediate (mis-centred) frame is ever visible.
+    /// ❌ Do NOT use preferred.width for targetX. That is the content width;
+    /// pw.frame.width is larger by the chrome (arrow + border). Using
+    /// preferred.width shifts the window left by ~half the chrome.
     ///
-    /// ❌ Do NOT call show() here. show() on an already-shown popover
-    /// repositions the window from scratch in screen coordinates, causing
-    /// a visible side-jump on every width change.
+    /// ❌ Do NOT read pw.frame.width before the contentSize write — it may
+    /// still hold the previous value on some layout paths.
+    ///
+    /// ❌ Do NOT call show() here — side-jump on every width change.
     ///
     /// Skipped entirely when isMenuBarHidden — no valid screen geometry.
     private func applyContentSize(_ preferred: NSSize) {
@@ -244,21 +253,29 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        // Compute targetX from preferred.width before the write.
         let buttonMidX = buttonWin.frame.minX + button.frame.midX
-        let targetX = max(
-            screen.visibleFrame.minX,
-            min(buttonMidX - preferred.width / 2,
-                screen.visibleFrame.maxX - preferred.width)
-        )
 
         mbkLog("PopoverController",
                "applyContentSize — WRITING (\(preferred.width),\(preferred.height)) "
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height)) "
-               + "targetX=\(targetX) buttonMidX=\(buttonMidX)")
+               + "buttonMidX=\(buttonMidX)")
 
-        // Write back-to-back in the same runloop cycle.
+        // Step 1: write contentSize.
         popover.contentSize = preferred
+
+        // Step 2: read chrome-wrapped width NOW — post-write is the only
+        // reliable point. Pre-write may still hold the previous value.
+        let chromeWidth = pw.frame.width
+        let targetX = max(
+            screen.visibleFrame.minX,
+            min(buttonMidX - chromeWidth / 2,
+                screen.visibleFrame.maxX - chromeWidth)
+        )
+
+        mbkLog("PopoverController",
+               "applyContentSize — chromeWidth=\(chromeWidth) targetX=\(targetX)")
+
+        // Step 3: snap x — same runloop cycle, no intermediate frame visible.
         pw.setFrameOrigin(NSPoint(x: targetX, y: pw.frame.origin.y))
 
         mbkLog("PopoverController", "applyContentSize — done")
