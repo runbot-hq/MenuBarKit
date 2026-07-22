@@ -12,9 +12,6 @@
 
 import Foundation
 import Observation
-import os.log
-
-private let log = Logger(subsystem: "MenuBarKitExample", category: "AppState")
 
 /// Navigation destinations for the example app's root view switcher.
 enum Route: Equatable {
@@ -30,9 +27,7 @@ enum Route: Equatable {
 final class AppState {
     /// Currently displayed route.
     var route: Route = .main {
-        didSet {
-            log.debug("[AppState] route changed: \(String(describing: oldValue), privacy: .public) → \(String(describing: route), privacy: .public)")
-        }
+        didSet { print("[AppState] route: \(oldValue) → \(self.route)") }
     }
     /// URL selected by the file picker opened from SettingsView (popover context). nil until first pick.
     var pickedURL: URL?
@@ -40,10 +35,10 @@ final class AppState {
     var sheetPickedURL: URL?
     /// Controls the error alert presented from SettingsView (popover level).
     var showAlert: Bool = false {
-        didSet { log.debug("[AppState] showAlert: \(oldValue, privacy: .public) → \(showAlert, privacy: .public)") }
+        didSet { print("[AppState] showAlert: \(oldValue) → \(self.showAlert)") }
     }
     /// Controls the error alert presented from inside SheetView.
     var showSheetAlert: Bool = false {
-        didSet { log.debug("[AppState] showSheetAlert: \(oldValue, privacy: .public) → \(showSheetAlert, privacy: .public)") }
+        didSet { print("[AppState] showSheetAlert: \(oldValue) → \(self.showSheetAlert)") }
     }
 }
