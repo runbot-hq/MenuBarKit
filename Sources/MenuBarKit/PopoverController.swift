@@ -142,10 +142,13 @@ public final class MBKPopoverController: NSObject {
             mbkLog("PopoverController", "applyContentSize — no button/window, skipping")
             return
         }
-        let buttonY = buttonWin.frame.origin.y
-        let screenH = buttonWin.screen?.frame.height ?? -1
-        guard screenH >= 0 && buttonY < screenH else {
-            mbkLog("PopoverController", "applyContentSize — menu bar hidden, skipping")
+        // Skip only when the status item's button is genuinely off-screen
+        // (e.g. auto-hidden menu bar). The previous buttonY-vs-screenHeight
+        // heuristic false-positived on ordinary, fully visible menu bars
+        // during live resizes, causing this whole function — including the
+        // positioningRect re-anchor — to be skipped and the arrow to drift.
+        if let screen = buttonWin.screen, !screen.frame.contains(buttonWin.frame.origin) {
+            mbkLog("PopoverController", "applyContentSize — button off-screen, skipping")
             return
         }
         guard abs(currentSize.width - preferred.width) > 1
