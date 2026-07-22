@@ -16,12 +16,15 @@
 //     preventing the outside-click monitor and workspace observer from
 //     closing the popover while the alert is on screen.
 //
-// Intentionally uses a fixed width (320) DIFFERENT from MainView's (260) to
-// exercise PopoverController's dynamic-width arrow centering fix. MUST be a
-// fixed .frame(width:) — NOT idealWidth + maxWidth: .infinity. The latter
-// makes the view stretch to fill whatever width the popover already has
-// instead of reporting its own intrinsic width via fittingSize, which is
-// what caused contentSize to stay frozen at the previous route's width.
+// Intentionally uses a fixed width (480) VERY DIFFERENT from MainView's (260)
+// to exercise PopoverController's dynamic-width arrow centering fix. The gap
+// was widened from an earlier 320 specifically to make any residual
+// arrow/box centering bug big and obvious at a glance instead of a subtle
+// ~30pt drift that's easy to miss in a screenshot. MUST be a fixed
+// .frame(width:) — NOT idealWidth + maxWidth: .infinity. The latter makes
+// the view stretch to fill whatever width the popover already has instead
+// of reporting its own intrinsic width via fittingSize, which is what
+// caused contentSize to stay frozen at the previous route's width.
 
 import MenuBarKit
 import SwiftUI
@@ -86,7 +89,7 @@ struct SettingsView: View {
             Button("← Back") { appState.route = .main }
         }
         .padding(16)
-        .frame(width: 320)
+        .frame(width: 480)
         .onAppear    { print("[SettingsView] onAppear") }
         .onDisappear { print("[SettingsView] onDisappear") }
     }
