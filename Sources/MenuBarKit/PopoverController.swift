@@ -27,6 +27,13 @@
 //      different width, re-issue show() with a fresh positioningRect instead
 //      of mutating contentSize.width in place.
 //
+//   hostingController.sizingOptions MUST stay []. Leaving it at the macOS
+//   default (.preferredContentSize) makes AppKit auto-write contentSize from
+//   the SwiftUI view's live intrinsic size on every layout pass — a second,
+//   competing write path that races our own applyContentHeight() call and
+//   reintroduces width flapping / arrow misalignment even though our code
+//   never explicitly asked for it. This is NOT optional.
+//
 //   popover.animates = false — prevents animation from showing the wrong
 //   pre-correction position.
 
@@ -134,6 +141,11 @@ public final class MBKPopoverController: NSObject {
 
     private func setupPopover() {
         hostingController = NSHostingController(rootView: rootView)
+        // MUST be []. See ARROW CENTERING note at top of file — leaving this at
+        // the macOS default (.preferredContentSize) reintroduces a second,
+        // competing contentSize writer that races applyContentHeight() and
+        // causes width flapping / arrow misalignment on navigation.
+        hostingController.sizingOptions = []
         popover = NSPopover()
         popover.contentViewController = hostingController
         popover.contentSize = contentSize
