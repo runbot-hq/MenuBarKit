@@ -62,27 +62,26 @@
 //   @MainActor work completes. Do NOT wrap removals in Task { @MainActor }
 //   — that would be use-after-free.
 //
-// ARROW CENTERING — 1pt positioningRect + geometric reposition on resize:
+// ARROW CENTERING — set contentSize before show(), then reposition on resize:
 //   show() is called ONCE per open with a 1pt-wide positioningRect at
-//   button.bounds.midX. AppKit centers the popover body on that point so
-//   the arrow appears at top-center for the initial contentSize.
+//   button.bounds.midX.
+//
+//   BEFORE calling show(), popover.contentSize is set to
+//   hostingController.view.fittingSize (if non-zero). This ensures AppKit
+//   places the window with the correct width from the start so the arrow
+//   is centered immediately.
+//
+//   ❌ Do NOT call show() before writing contentSize — AppKit places the
+//   window based on whatever contentSize is set at show() time. If it is
+//   the init default (320x300) and the real content is narrower, the window
+//   will be offset and applyContentSize will fight to correct it.
 //
 //   ❌ Do NOT call show() again after contentSize writes — re-anchors and jumps.
 //
-//   On resize, AppKit re-runs anchor geometry and shifts the window x.
-//   We correct it by reading popoverWindow.frame.width (the full window
-//   width including arrow+border chrome) AFTER the contentSize write, then:
-//
-//     buttonMidXOnScreen = buttonWin.frame.minX + button.frame.midX
-//     idealX             = buttonMidXOnScreen - popoverWindow.frame.width / 2
-//     clampedX           = max(visibleFrame.minX, min(idealX, visibleFrame.maxX - windowWidth))
-//
-//   ❌ Do NOT use preferred.width / 2 — that is content width, not window
-//     width. The window is ~52pt wider (arrow + border chrome on each side),
-//     so using content width offsets the popover ~26pt to the right.
-//
-//   ❌ Do NOT use button.bounds.midX for buttonMidXOnScreen — bounds is
-//     button-local. Use buttonWin.frame.minX + button.frame.midX.
+//   On subsequent resize (e.g. navigating to a wider/taller view),
+//   applyContentSize writes the new contentSize and repositions the window
+//   using the WINDOW width (content + chrome), not content width.
+//   See ARROW CENTERING — reposition in applyContentSize below.
 //
 // SIZE OBSERVATION — why observe view.frame and read fittingSize:
 //   preferredContentSize on NSHostingController is only recomputed when
@@ -193,13 +192,26 @@ public final class MBKPopoverController: NSObject {
 
     /// Shows the popover centered under the status-bar button.
     ///
-    /// show() is called ONCE per open with a 1pt-wide positioningRect at
-    /// button.bounds.midX so AppKit places the initial popover centered on
-    /// the button. Subsequent resizes are handled by applyContentSize.
+    /// Sets contentSize to fittingSize BEFORE show() so AppKit places the
+    /// window at the correct width from the start — arrow centered immediately.
+    /// See ARROW CENTERING in file header.
     ///
-    /// ❌ Do NOT call show() again on resize — see ARROW CENTERING in file header.
+    /// ❌ Do NOT call show() before writing contentSize.
+    /// ❌ Do NOT call show() again on resize — re-anchors and jumps.
     private func openPopover() {
         guard let button = statusItem.button else { return }
+
+        // Set the correct contentSize BEFORE show() so AppKit places the
+        // window at the right width. fittingSize is available synchronously
+        // because the hosting controller's view has already done its first
+        // layout pass by the time the user clicks the status bar button.
+        // ❌ Do NOT skip this — the init default (320x300) will mis-place the window.
+        let fitting = hostingController.view.fittingSize
+        if fitting.width > 0, fitting.height > 0 {
+            mbkLog("PopoverController", "openPopover — pre-sizing to fittingSize=(\(fitting.width),\(fitting.height))")
+            popover.contentSize = fitting
+        }
+
         let midX = button.bounds.midX
         let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
                                 width: 1, height: button.bounds.height)
@@ -276,14 +288,13 @@ public final class MBKPopoverController: NSObject {
         }
         let currentSize = popover.contentSize
         guard let button = statusItem.button,
-              let buttonWin = button.window,
-              let screen = buttonWin.screen else {
-            mbkLog("PopoverController", "applyContentSize — no button/window/screen, skipping")
+              let buttonWin = button.window else {
+            mbkLog("PopoverController", "applyContentSize — no button/window, skipping")
             return
         }
         let buttonY = buttonWin.frame.origin.y
-        let screenH = screen.frame.height
-        let isMenuBarHidden = buttonY >= screenH
+        let screenH = buttonWin.screen?.frame.height ?? -1
+        let isMenuBarHidden = screenH < 0 || buttonY >= screenH
         mbkLog("PopoverController",
                "applyContentSize — "
                + "preferred=(\(preferred.width),\(preferred.height)) "
@@ -304,11 +315,13 @@ public final class MBKPopoverController: NSObject {
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
         popover.contentSize = preferred
 
-        // Reposition using the WINDOW width (content + chrome), not content width.
+        // Reposition window so arrow stays centered under the button.
+        // Use popoverWindow.frame.width (window including chrome), NOT preferred.width.
         // button.frame.midX is in button-window coords; add buttonWin.frame.minX
-        // to get the screen coordinate.
+        // to get the screen x coordinate.
         // ❌ Do NOT use preferred.width / 2 — see ARROW CENTERING in file header.
-        if let popoverWindow = popover.contentViewController?.view.window {
+        if let popoverWindow = popover.contentViewController?.view.window,
+           let screen = buttonWin.screen {
             let windowWidth = popoverWindow.frame.width
             let buttonMidX = buttonWin.frame.minX + button.frame.midX
             let idealX = buttonMidX - windowWidth / 2
@@ -318,7 +331,7 @@ public final class MBKPopoverController: NSObject {
             if abs(currentX - clampedX) > 1 {
                 mbkLog("PopoverController",
                        "applyContentSize — reposition x \(currentX) → \(clampedX) "
-                       + "(buttonMidX=\(buttonMidX) windowWidth=\(windowWidth) idealX=\(idealX))")
+                       + "(buttonMidX=\(buttonMidX) windowWidth=\(windowWidth))")
                 popoverWindow.setFrameOrigin(NSPoint(x: clampedX, y: popoverWindow.frame.origin.y))
             }
         }
