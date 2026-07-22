@@ -121,15 +121,18 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
-    /// Writes the new contentSize and corrects window x AFTER the write only.
+    /// Writes the new contentSize and re-anchors the arrow to the button's
+    /// midX by re-assigning positioningRect after the write.
     ///
-    /// IMPORTANT: Do not reposition before the write. By the time our frame
-    /// observer fires, AppKit auto-layout has already committed the new window
-    /// width into pw.frame.width even though popover.contentSize is stale.
-    /// Reading pw.frame.width pre-write gives the new width, not the current
-    /// one — computing idealX from it moves the window to the wrong x for the
-    /// still-old chrome size, breaking centering. Post-write, pw.frame.width
-    /// is final and the correction is exact.
+    /// IMPORTANT: Do not hand-correct the window's frame.origin.x. Calling
+    /// setFrameOrigin() moves the *window* but does not re-run AppKit's
+    /// internal popover-frame layout, so the arrow triangle (which AppKit
+    /// draws relative to positioningRect, not the window origin) drifts out
+    /// of sync with the window edge whenever content width changes between
+    /// views. Re-assigning positioningRect instead forces AppKit to redo the
+    /// full frame + arrow layout pass atomically, so the window and the
+    /// arrow tip are always recomputed together and stay centered on the
+    /// button regardless of the new content width.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -148,30 +151,24 @@ public final class MBKPopoverController: NSObject {
         guard abs(currentSize.width - preferred.width) > 1
                 || abs(currentSize.height - preferred.height) > 1 else { return }
 
-        guard let screen = buttonWin.screen,
-              let pw = popover.contentViewController?.view.window else {
+        guard popover.contentViewController?.view.window != nil else {
             popover.contentSize = preferred
             return
         }
-
-        let buttonMidX = buttonWin.frame.minX + button.frame.midX
 
         mbkLog("PopoverController",
                "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
                + "prev=(\(currentSize.width),\(currentSize.height))")
         popover.contentSize = preferred
 
-        // Correct x after write — pw.frame.width is now the final chrome width.
-        let winW = pw.frame.width
-        let idealX = buttonMidX - winW / 2
-        let clampedX = max(screen.visibleFrame.minX, min(idealX, screen.visibleFrame.maxX - winW))
-        let curX = pw.frame.origin.x
-        if abs(curX - clampedX) > 1 {
-            mbkLog("PopoverController",
-                   "applyContentSize — reposition x \(curX) → \(clampedX) "
-                   + "(buttonMidX=\(buttonMidX) winW=\(winW))")
-            pw.setFrameOrigin(NSPoint(x: clampedX, y: pw.frame.origin.y))
-        }
+        // Re-anchor the arrow to the button's midX by re-assigning
+        // positioningRect, forcing AppKit to redo frame + arrow layout
+        // together so the arrow stays centered regardless of content width.
+        let midX = button.bounds.midX
+        let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
+                                width: 1, height: button.bounds.height)
+        popover.positioningRect = centerRect
+        mbkLog("PopoverController", "applyContentSize — re-anchored positioningRect at buttonMidX")
     }
 
     // MARK: - Workspace observer
