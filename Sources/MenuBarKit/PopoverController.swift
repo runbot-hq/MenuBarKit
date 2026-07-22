@@ -12,24 +12,32 @@
 //
 //   WIDTH changes are NOT safe to apply in place. NSPopover only centers its
 //   box around positioningRect ONCE, at show() time. Mutating contentSize.width
-//   (or re-assigning positioningRect) on an already-visible popover does NOT
-//   re-trigger that centering — the box just grows/shrinks from a fixed edge,
-//   desyncing visibly from the arrow.
+//   on an already-visible popover does NOT re-trigger that centering — the
+//   box just grows/shrinks from a fixed edge, desyncing visibly from the
+//   arrow.
 //
 //   FIX: when a width change is detected, close the popover and call show()
-//   again fresh (mirroring openPopover()'s exact call shape) rather than
-//   mutating contentSize in place. popover.animates = false makes this
-//   invisible to the user — no flicker.
+//   again fresh (mirroring openPopover()'s exact call shape). popover.animates
+//   = false makes this invisible to the user — no flicker.
 //
-//   ⚠️  CRITICAL GOTCHA — SIZE OBSERVATION: NSView implements MANUAL KVO for
-//      `frame`, gated behind `postsFrameChangedNotifications` (defaults to
-//      false). Swift's `.observe(\.frame)` SILENTLY NO-OPS without it — no
-//      crash, no warning, the closure simply never runs. This bit us for two
-//      full commits: our width-reshow logic was 100% correct but dead code,
-//      because the observer that was supposed to call it never fired even
-//      once. ALWAYS set `postsFrameChangedNotifications = true` and use
-//      NotificationCenter + `NSView.frameDidChangeNotification` to observe
-//      NSView frame changes — never rely on KVO `.observe(\.frame)` for this.
+//   ⚠️  CRITICAL GOTCHA — SIZE OBSERVATION: DO NOT try to observe the hosted
+//      SwiftUI content's size from the AppKit side. Two separate approaches
+//      were tried and BOTH silently failed to ever fire in practice:
+//        1. hostingController.view.observe(\.frame) — NSView's `frame` uses
+//           manual KVO gated behind postsFrameChangedNotifications, which
+//           defaults to false.
+//        2. NotificationCenter + NSView.frameDidChangeNotification, even
+//           after explicitly setting postsFrameChangedNotifications = true.
+//      Root cause of #2 not fully isolated, but suspect NSHostingController
+//      manages its root view's frame through a path that doesn't consistently
+//      post this notification for programmatic (non-user-drag) resizes.
+//
+//      INSTEAD: capture size directly from SwiftUI via an internal
+//      GeometryReader wrapping rootView, reporting through onChange — see
+//      wrappedRootView below. SwiftUI always knows its own size accurately
+//      (confirmed reliable via the example app's own debug GeometryReader
+//      logging on every test run). Route that size straight into
+//      applyContentSize() with no AppKit observation layer in between.
 //
 //   ❌ NEVER call pw.setFrameOrigin() / mutate the popover window's frame
 //      directly to "correct" its x position. AppKit computes the arrow's
@@ -48,7 +56,6 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Configuration
 
     private let overlayGate: MBKOverlayGate
-    private let rootView: AnyView
     private let symbolName: String
     private let contentSize: NSSize
 
@@ -60,7 +67,6 @@ public final class MBKPopoverController: NSObject {
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
-    nonisolated(unsafe) private var frameChangeObserver: NSObjectProtocol?
 
     // MARK: - Init
 
@@ -70,11 +76,15 @@ public final class MBKPopoverController: NSObject {
         symbolName: String = "menubar.rectangle",
         contentSize: NSSize = NSSize(width: 320, height: 300)
     ) {
-        self.rootView = AnyView(rootView)
         self.overlayGate = overlayGate
         self.symbolName = symbolName
         self.contentSize = contentSize
+        // Deferred: wrappedRootView needs `self` for the onChange callback,
+        // so it's built in setupPopover() once `self` is fully initialized.
+        self.pendingRootView = AnyView(rootView)
     }
+
+    private var pendingRootView: AnyView
 
     // MARK: - Setup
 
@@ -143,7 +153,23 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Popover setup
 
     private func setupPopover() {
-        hostingController = NSHostingController(rootView: rootView)
+        // Wrap the caller's root view in a GeometryReader that reports size
+        // changes straight to applyContentSize() — see CRITICAL GOTCHA note
+        // at the top of this file for why we no longer try to observe size
+        // from the AppKit/NSView side.
+        let wrapped = pendingRootView
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onChange(of: geo.size) { _, newSize in
+                            applyContentSize(newSize)
+                        }
+                        .onAppear {
+                            applyContentSize(geo.size)
+                        }
+                }
+            )
+        hostingController = NSHostingController(rootView: AnyView(wrapped))
         hostingController.sizingOptions = []
         popover = NSPopover()
         popover.contentViewController = hostingController
@@ -151,33 +177,10 @@ public final class MBKPopoverController: NSObject {
         popover.animates = false
         popover.behavior = .applicationDefined
         popover.delegate = self
-        setupSizeObserver()
     }
 
-    // MARK: - Size observer
-
-    /// Observes the hosting view's frame via NotificationCenter, NOT KVO.
-    /// See the CRITICAL GOTCHA note at the top of this file: NSView's `frame`
-    /// KVO is manual and gated behind postsFrameChangedNotifications, which
-    /// defaults to false. Without explicitly enabling it, `.observe(\.frame)`
-    /// silently never fires. This was the root cause of every prior failure.
-    private func setupSizeObserver() {
-        let view = hostingController.view
-        view.postsFrameChangedNotifications = true
-        frameChangeObserver = NotificationCenter.default.addObserver(
-            forName: NSView.frameDidChangeNotification,
-            object: view,
-            queue: nil
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                let settled = self.hostingController.view.fittingSize
-                self.applyContentSize(settled)
-            }
-        }
-    }
-
-    /// Applies a new preferred content size.
+    /// Applies a new preferred content size, called directly from the
+    /// SwiftUI GeometryReader wrapping the root view (see setupPopover()).
     ///
     /// Height-only changes are written directly to contentSize — AppKit
     /// handles that correctly on an already-visible popover.
@@ -186,14 +189,22 @@ public final class MBKPopoverController: NSObject {
     /// at top of file) because NSPopover never re-centers its box around
     /// positioningRect except at show() time. animates=false makes this
     /// invisible to the user.
-    private func applyContentSize(_ preferred: NSSize) {
-        guard popover.isShown, let button = statusItem.button else { return }
+    private func applyContentSize(_ preferred: CGSize) {
+        guard let button = statusItem.button else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
         let currentSize = popover.contentSize
         let widthChanged = abs(currentSize.width - preferred.width) > 1
         let heightChanged = abs(currentSize.height - preferred.height) > 1
         guard widthChanged || heightChanged else {
             mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
+            return
+        }
+
+        guard popover.isShown else {
+            // Popover not visible yet (e.g. first layout pass before show()).
+            // Just record the size for the next openPopover() pre-size read.
+            popover.contentSize = preferred
+            mbkLog("PopoverController", "applyContentSize — popover not shown, recorded (\(preferred.width),\(preferred.height))")
             return
         }
 
@@ -264,9 +275,6 @@ public final class MBKPopoverController: NSObject {
     deinit {
         if let observer = workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
-        }
-        if let observer = frameChangeObserver {
-            NotificationCenter.default.removeObserver(observer)
         }
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
