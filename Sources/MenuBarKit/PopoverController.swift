@@ -19,8 +19,8 @@
 //   popoverShouldClose returns false (via overlayGate.hasActiveOverlay), and
 //   the workspace observer skips performClose while any overlay is active.
 //
-//   This is the simpler behaviour: the user's mental model is “sheet is
-//   blocking, nothing else happens until I dismiss it.” No hide-and-restore
+//   This is the simpler behaviour: the user's mental model is "sheet is
+//   blocking, nothing else happens until I dismiss it." No hide-and-restore
 //   cycle to reason about.
 //
 //   The alternative — hide the popover window without closing it so the sheet
@@ -125,6 +125,32 @@
 //   This is an info-only note — not a current bug. Do not add a spurious
 //   Task { @MainActor } wrapper around the deinit removals; that would be
 //   a use-after-free (self is already deallocated when the Task runs).
+//
+// SIDE-JUMP UNDER AUTO-HIDE MENUBAR (HIDDEN STATE) — fix/side-jump-autohide:
+//   When macOS auto-hide menubar is hidden the Dock pushes the NSStatusItem
+//   button window off the top edge: buttonWin.frame.origin.y >= screen.frame.height.
+//   In this state ANY contentSize write causes AppKit to re-run full anchor
+//   geometry against the off-screen button position, collapsing the popover
+//   x-origin to 0 (side-jump).
+//
+//   `sizingOptions = .preferredContentSize` causes AppKit to write contentSize
+//   automatically on every SwiftUI preferredContentSize KVO change — e.g. when
+//   the host app switches routes (main <-> settings). This is the trigger.
+//
+//   IMPORTANT — what does NOT work as a signal:
+//     button.window.screen == nil  ← WRONG. Screen association is retained
+//     even while the menubar is hidden.
+//
+//   CORRECT signal: buttonWin.frame.origin.y >= buttonScreen.frame.height
+//     Observed: buttonY=982, screenH=982 when hidden.
+//     Observed: buttonY=949, screenH=982 when visible.
+//
+//   Fix: replace sizingOptions = .preferredContentSize with a manual KVO
+//   observer on preferredContentSize. The observer checks isMenuBarHidden
+//   before writing contentSize. When hidden the write is skipped — the current
+//   size is already correct (SwiftUI laid out fine). The next KVO fire after
+//   the menubar re-appears has a valid button position and writes normally.
+//   See runbot-hq/run-bot#2237.
 
 import AppKit
 import SwiftUI
@@ -157,6 +183,12 @@ public final class MBKPopoverController: NSObject {
     private var popover: NSPopover!
     /// Hosts the root SwiftUI view. Assigned in `setup()` — see IMPLICIT-UNWRAPPED OPTIONALS in the file header.
     private var hostingController: NSHostingController<AnyView>!
+
+    /// KVO token for `NSHostingController.preferredContentSize`.
+    /// Used instead of `sizingOptions = .preferredContentSize` so we can guard
+    /// against contentSize writes while the auto-hide menubar is hidden.
+    /// See SIDE-JUMP UNDER AUTO-HIDE MENUBAR in the file header.
+    private var sizeObservation: NSKeyValueObservation?
 
     /// Guards against double-call of setup(). See setup() for rationale.
     private var isSetUp = false
@@ -253,9 +285,16 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Popover setup
 
     /// Creates and configures the NSPopover with the hosted SwiftUI root view.
+    ///
+    /// ❌ Do NOT set `hostingController.sizingOptions = .preferredContentSize`.
+    /// That causes AppKit to write `popover.contentSize` automatically on every
+    /// SwiftUI preferredContentSize change, including while the auto-hide menubar
+    /// is hidden. Any contentSize write with the button off-screen causes a
+    /// side-jump. Instead, a manual KVO observer in `setupSizeObserver()` guards
+    /// the write on `isMenuBarHidden`. See SIDE-JUMP note in the file header.
     private func setupPopover() {
         hostingController = NSHostingController(rootView: rootView)
-        hostingController.sizingOptions = .preferredContentSize
+        // ❌ Do NOT restore sizingOptions = .preferredContentSize — see doc comment above.
         popover = NSPopover()
         popover.contentViewController = hostingController
         popover.contentSize = contentSize
@@ -263,6 +302,89 @@ public final class MBKPopoverController: NSObject {
         // .applicationDefined = we handle all dismiss logic ourselves.
         popover.behavior = .applicationDefined
         popover.delegate = self
+        setupSizeObserver()
+    }
+
+    // MARK: - Preferred content size observer
+
+    /// Installs a KVO observer on `NSHostingController.preferredContentSize`.
+    ///
+    /// This replaces `sizingOptions = .preferredContentSize`. Both approaches
+    /// update `popover.contentSize` when SwiftUI's layout changes, but the
+    /// manual observer lets us guard the write when the auto-hide menubar is
+    /// hidden (buttonY >= screenH), preventing the side-jump.
+    ///
+    /// See SIDE-JUMP UNDER AUTO-HIDE MENUBAR in the file header.
+    private func setupSizeObserver() {
+        sizeObservation = hostingController.observe(
+            \.preferredContentSize,
+            options: [.new]
+        ) { [weak self] controller, _ in
+            Task { @MainActor [weak self] in
+                self?.applyPreferredContentSize(controller.preferredContentSize)
+            }
+        }
+    }
+
+    /// Applies a new preferred content size to the popover, guarding against
+    /// side-jump when the auto-hide menubar is hidden.
+    ///
+    /// Called from the `preferredContentSize` KVO observer.
+    /// The write is skipped when `buttonWin.frame.origin.y >= screen.frame.height`
+    /// — the signal that the Dock has pushed the NSStatusItem window off-screen.
+    /// See SIDE-JUMP UNDER AUTO-HIDE MENUBAR in the file header.
+    private func applyPreferredContentSize(_ preferred: NSSize) {
+        guard popover.isShown else {
+            mbkLog("PopoverController", "applyPreferredContentSize — popover not shown, skipping")
+            return
+        }
+        guard preferred.width > 0, preferred.height > 0 else {
+            mbkLog("PopoverController", "applyPreferredContentSize — zero size (\(preferred.width),\(preferred.height)), skipping")
+            return
+        }
+        let currentSize = popover.contentSize
+        let popoverWinFrame = popover.contentViewController?.view.window?.frame
+        let buttonWin = statusItem.button?.window
+        let buttonWinFrame = buttonWin?.frame
+        let buttonScreen = buttonWin?.screen
+        let buttonY = buttonWinFrame?.origin.y ?? -1
+        let screenH = buttonScreen?.frame.height ?? -1
+        let isMenuBarHidden = buttonScreen != nil && buttonY >= screenH
+        mbkLog("PopoverController",
+               "applyPreferredContentSize — "
+               + "preferred=(\(preferred.width),\(preferred.height)) "
+               + "current=(\(currentSize.width),\(currentSize.height)) "
+               + "popoverWin=\(String(describing: popoverWinFrame)) "
+               + "buttonWin=\(String(describing: buttonWinFrame)) "
+               + "buttonScreen=\(String(describing: buttonScreen?.frame)) "
+               + "buttonY=\(buttonY) screenH=\(screenH) "
+               + "isMenuBarHidden=\(isMenuBarHidden)")
+        // fix/side-jump-autohide: skip write when menubar is hidden.
+        // buttonWin.frame.origin.y >= screen.frame.height means the Dock has
+        // slid the NSStatusItem window off the top edge. Any contentSize write
+        // in this state causes AppKit anchor geometry to collapse to x=0.
+        // NOTE: button.window.screen == nil is NOT the correct signal — the
+        // screen association is kept even when the menubar is hidden.
+        guard !isMenuBarHidden else {
+            mbkLog("PopoverController",
+                   "applyPreferredContentSize — SKIP: isMenuBarHidden=true "
+                   + "(buttonY=\(buttonY) >= screenH=\(screenH))")
+            return
+        }
+        guard abs(currentSize.width - preferred.width) > 1
+                || abs(currentSize.height - preferred.height) > 1 else {
+            mbkLog("PopoverController", "applyPreferredContentSize — no-op: size unchanged (delta within 1pt)")
+            return
+        }
+        mbkLog("PopoverController",
+               "applyPreferredContentSize — WRITING contentSize=(\(preferred.width),\(preferred.height)) "
+               + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height)) "
+               + "popoverWin=\(String(describing: popoverWinFrame))")
+        popover.contentSize = preferred
+        let postWriteFrame = popover.contentViewController?.view.window?.frame
+        mbkLog("PopoverController",
+               "applyPreferredContentSize — contentSize written "
+               + "popoverWin.post=\(String(describing: postWriteFrame))")
     }
 
     // MARK: - Workspace observer
