@@ -12,11 +12,16 @@
 //
 //   On resize (applyContentSize), AppKit may pre-resize the window BEFORE
 //   our contentSize write fires, shifting x incorrectly. We correct x both
-//   BEFORE and AFTER the write using:
+//   BEFORE and AFTER the write:
 //
-//     buttonMidXOnScreen = buttonWin.frame.minX + button.frame.midX
-//     idealX             = buttonMidXOnScreen - popoverWindow.frame.width / 2
-//     clampedX           = clamped to screen.visibleFrame
+//     Pre-write:  use pw.frame.width (current window width, still valid)
+//     Post-write: use preferred.width + chromeWidth
+//                 where chromeWidth = pw.frame.width - currentSize.width,
+//                 captured BEFORE the write.
+//
+//   ❌ Do NOT read pw.frame.width after the contentSize write — AppKit has
+//   not updated pw.frame yet in the same runloop turn; it returns the old
+//   stale width, producing wrong reposition geometry.
 //
 //   popover.animates = false — prevents animation from showing the wrong
 //   pre-correction position.
@@ -148,9 +153,13 @@ public final class MBKPopoverController: NSObject {
     /// Writes a new contentSize to the popover and ensures the window x is
     /// correct both before and after the write.
     ///
-    /// AppKit may pre-resize the popover window (e.g. auto-layout pass) before
-    /// this method fires, leaving x wrong. We correct x before the write so
-    /// there is no frame where the window is at the wrong position.
+    /// Pre-write correction: uses pw.frame.width (valid — AppKit hasn't
+    /// changed it yet).
+    ///
+    /// Post-write correction: uses preferred.width + chromeWidth where
+    /// chromeWidth is captured before the write. pw.frame.width is stale
+    /// immediately after the write — AppKit updates it asynchronously.
+    /// ❌ Do NOT read pw.frame.width after popover.contentSize = preferred.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -183,9 +192,11 @@ public final class MBKPopoverController: NSObject {
 
         let buttonMidX = buttonWin.frame.minX + button.frame.midX
 
-        // Correct x BEFORE write — AppKit may have pre-resized the window
-        // leaving it at the wrong x already.
+        // --- Pre-write: pw.frame.width is still valid here ---
         let preWinW = pw.frame.width
+        // Capture chrome width before the write for use in post-write calc.
+        // ❌ Do NOT move this after popover.contentSize = preferred.
+        let chromeWidth = preWinW - currentSize.width
         let preIdealX = buttonMidX - preWinW / 2
         let preClampedX = max(screen.visibleFrame.minX, min(preIdealX, screen.visibleFrame.maxX - preWinW))
         if abs(pw.frame.origin.x - preClampedX) > 1 {
@@ -200,16 +211,14 @@ public final class MBKPopoverController: NSObject {
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
         popover.contentSize = preferred
 
-        // Correct x AFTER write — the contentSize write may shift x again.
-        let postWinW = pw.frame.width
+        // --- Post-write: pw.frame.width is STALE here — use preferred + chrome ---
+        let postWinW = preferred.width + chromeWidth
         let postIdealX = buttonMidX - postWinW / 2
         let postClampedX = max(screen.visibleFrame.minX, min(postIdealX, screen.visibleFrame.maxX - postWinW))
-        if abs(pw.frame.origin.x - postClampedX) > 1 {
-            mbkLog("PopoverController",
-                   "applyContentSize — post-write reposition x \(pw.frame.origin.x) → \(postClampedX) "
-                   + "(buttonMidX=\(buttonMidX) winW=\(postWinW))")
-            pw.setFrameOrigin(NSPoint(x: postClampedX, y: pw.frame.origin.y))
-        }
+        mbkLog("PopoverController",
+               "applyContentSize — post-write reposition x \(pw.frame.origin.x) → \(postClampedX) "
+               + "(buttonMidX=\(buttonMidX) chromeWidth=\(chromeWidth) postWinW=\(postWinW))")
+        pw.setFrameOrigin(NSPoint(x: postClampedX, y: pw.frame.origin.y))
 
         mbkLog("PopoverController", "applyContentSize — done")
     }
