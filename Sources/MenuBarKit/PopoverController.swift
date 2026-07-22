@@ -6,39 +6,36 @@
 // is injected via closures at configuration time.
 //
 // ARROW CENTERING:
-//   Both contentSize.width AND height are allowed to vary per-view. The rule
-//   that keeps the arrow correctly anchored through every resize:
+//   Height-only changes are updated in place via contentSize — AppKit
+//   correctly grows/shrinks height from the anchored edge without needing to
+//   recompute horizontal centering, so this direction just works.
 //
-//     After every contentSize write (in applyContentSize()), re-derive
-//     positioningRect from the button's CURRENT bounds and re-assign it to
-//     the popover. positioningRect is AppKit's own anchor INPUT, expressed in
-//     the status-item button's local coordinate space — NOT the window frame.
-//     Re-assigning it forces AppKit to fully redo its internal arrow+window-
-//     position computation together, from a single source of truth, so the
-//     arrow and the box can never disagree about where they are.
+//   WIDTH changes are NOT safe to apply in place. NSPopover only centers its
+//   box around positioningRect ONCE, at show() time. Mutating contentSize.width
+//   (or re-assigning positioningRect) on an already-visible popover does NOT
+//   re-trigger that centering — the box just grows/shrinks from a fixed edge,
+//   desyncing visibly from the arrow. Also note: positioningRect is derived
+//   purely from button.bounds, which never changes between calls, so
+//   "re-assigning" it to an already-shown popover is a no-op regardless of
+//   the new contentSize — it was never going to move anything.
+//
+//   FIX: when a width change is detected, close the popover and call show()
+//   again fresh (mirroring openPopover()'s exact call shape) rather than
+//   mutating contentSize in place. A fresh show() re-triggers AppKit's own
+//   anchor-centering math against the new size. popover.animates = false
+//   makes this invisible to the user — no flicker, no visible close/reopen.
 //
 //   ❌ NEVER call pw.setFrameOrigin() / mutate the popover window's frame
-//      directly to "correct" its x position after a contentSize change.
-//      AppKit computes the arrow's position from positioningRect/anchor at
-//      the time contentSize is set, NOT from wherever the window frame ends
-//      up afterward. Manually moving the window after the write creates two
-//      disagreeing authorities and they inevitably desync — this is the
-//      original bug.
+//      directly to "correct" its x position. AppKit computes the arrow's
+//      position from positioningRect/anchor at show()-time only. Manually
+//      moving the window afterward creates two disagreeing authorities.
 //
-//   ❌ NEVER read buttonWin.frame / screen.frame to compute an absolute x
-//      position. Those values go transiently invalid during menu-bar
-//      auto-hide slide transitions. positioningRect is in button-local
-//      coordinates and never touches this data.
+//   ❌ NEVER read buttonWin.frame / screen.frame for manual correction —
+//      those values go transiently invalid during menu-bar auto-hide slides.
 //
-//   ⚠️  NEVER re-assign positioningRect (or call show()) without first
-//      confirming button.bounds is non-zero via canComputePositioningRect().
-//      A prior attempt at this fix skipped that guard and broke show()
-//      entirely — clicking the status item produced no popover at all,
-//      because a zero-size button (read before its first layout pass
-//      completed) produced a degenerate zero-size positioningRect.
-//
-//   popover.animates = false — prevents animation from showing an
-//   intermediate, not-yet-anchor-corrected position.
+//   ⚠️  NEVER call show() without confirming button.bounds is non-zero
+//      first (see positioningRect(for:) below). A degenerate zero-size rect
+//      makes show() silently fail — no crash, no popover, nothing.
 
 import AppKit
 import SwiftUI
@@ -120,17 +117,8 @@ public final class MBKPopoverController: NSObject {
             mbkLog("PopoverController", "openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
         }
 
-        // Build the anchor rect as a LOCAL value and pass it directly to
-        // show() — do NOT round-trip through popover.positioningRect here.
-        // At first-show time the status item may not have completed its
-        // very first AppKit layout pass, and reading button.bounds back off
-        // popover.positioningRect after an intermediate assignment adds a
-        // needless extra read of state that isn't guaranteed settled yet.
-        // This mirrors the exact call shape that is known to work reliably.
-        let midX = button.bounds.midX
-        let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
-                                width: 1, height: button.bounds.height)
-        popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
+        guard let rect = positioningRect(for: button) else { return }
+        popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
         mbkLog("PopoverController", "popover shown")
         startEventMonitor()
@@ -138,8 +126,8 @@ public final class MBKPopoverController: NSObject {
 
     /// Returns a fresh positioningRect derived from the button's CURRENT
     /// bounds, or nil if those bounds are degenerate (zero width/height).
-    /// A zero-size rect must never be written into popover.positioningRect —
-    /// that silently breaks AppKit's internal show()/anchor machinery.
+    /// A zero-size rect must never be passed to show() — that silently
+    /// breaks AppKit's internal anchor machinery.
     private func positioningRect(for button: NSStatusBarButton) -> NSRect? {
         let bounds = button.bounds
         guard bounds.width > 0, bounds.height > 0 else {
@@ -186,35 +174,40 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
-    /// Writes a new contentSize (both width AND height allowed to vary) and
-    /// then re-assigns positioningRect — guarded against degenerate button
-    /// bounds — so AppKit fully redoes its own arrow+window-position
-    /// computation against the new size. This is the only operation that
-    /// should ever influence the popover's on-screen x position. Never
-    /// follow this with a manual setFrameOrigin() call.
+    /// Applies a new preferred content size.
+    ///
+    /// Height-only changes are written directly to contentSize — AppKit
+    /// handles that correctly on an already-visible popover.
+    ///
+    /// Width changes require a full close+reshow (see ARROW CENTERING note
+    /// at top of file) because NSPopover never re-centers its box around
+    /// positioningRect except at show() time. animates=false makes this
+    /// invisible to the user.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown, let button = statusItem.button else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
         let currentSize = popover.contentSize
-        guard abs(currentSize.width - preferred.width) > 1
-                || abs(currentSize.height - preferred.height) > 1 else {
+        let widthChanged = abs(currentSize.width - preferred.width) > 1
+        let heightChanged = abs(currentSize.height - preferred.height) > 1
+        guard widthChanged || heightChanged else {
             mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
             return
         }
 
-        mbkLog("PopoverController",
-               "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
-               + "prev=(\(currentSize.width),\(currentSize.height))")
-        popover.contentSize = preferred
-
-        // Only re-assign positioningRect if the button currently reports
-        // valid (non-zero) bounds. By this point in the popover's lifecycle
-        // the button has already been laid out at least once (it was used
-        // to show() the popover originally), so this should always succeed
-        // in practice — but the guard costs nothing and eliminates the
-        // exact failure mode that broke the previous attempt.
-        if let rect = positioningRect(for: button) {
-            popover.positioningRect = rect
+        if widthChanged {
+            mbkLog("PopoverController",
+                   "applyContentSize — width changed (\(currentSize.width)→\(preferred.width)), "
+                   + "re-showing popover for correct centering")
+            popover.contentSize = preferred
+            guard let rect = positioningRect(for: button) else { return }
+            popover.performClose(nil)
+            popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
+            mbkLog("PopoverController", "applyContentSize — re-shown at (\(preferred.width),\(preferred.height))")
+        } else {
+            mbkLog("PopoverController",
+                   "applyContentSize — height-only change, writing (\(preferred.width),\(preferred.height)) "
+                   + "prev=(\(currentSize.width),\(currentSize.height))")
+            popover.contentSize = preferred
         }
     }
 
