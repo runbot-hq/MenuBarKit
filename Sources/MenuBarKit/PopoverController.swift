@@ -11,35 +11,34 @@
 //   re-trigger that centering — the box just grows/shrinks from a fixed
 //   edge, desyncing visibly from the arrow.
 //
-//   FIX (current): snapshot the popover window's frame immediately after
-//   show() returns (the only moment AppKit has placed it correctly and
-//   nothing else has mutated it yet). Store:
-//     - sessionAnchorX: window.frame.midX  — horizontal center
-//     - sessionAnchorY: window.frame.maxY  — top edge (arrow attachment)
-//   On every subsequent applyContentSize() call during the same open
-//   session, set contentSize then overwrite the window frame using those
-//   two cached values as the fixed anchor. Clear both in popoverDidClose().
+//   FIX (current): after setting popover.contentSize, compensate for
+//   AppKit's grow-from-edge default by shifting the window origin by the
+//   size delta — NOT by recomputing origin from scratch:
+//     - dx = (newWidth - oldWidth) / 2  → shift origin.x left by dx
+//       so window.midX stays pinned to the same screen position.
+//     - dy = newHeight - oldHeight      → shift origin.y down by dy
+//       so window.maxY stays pinned (top edge stays touching the arrow).
+//   This works entirely in window-frame space and never mixes content
+//   size with chrome dimensions.
 //
-//   ❌ A PRIOR ATTEMPT re-queried button screen coordinates on every resize.
-//      button.minY is NOT stable across open/close cycles: macOS auto-hides
-//      the menu bar, sliding the status bar window off-screen and back, so
-//      the button's screen-Y legitimately changes between sessions.
-//      Confirmed in logs: anchor.minY = 951.5 on first open, 984.5 on
-//      second — causing the popover to drift ~33pt upward each cycle.
+//   ❌ PRIOR ATTEMPT: set frame.size = contentSize, then recomputed
+//      frame.origin.x = anchorX - contentSize.width / 2. Wrong because
+//      anchorX = window.frame.midX includes chrome (shadow/border)
+//      but contentSize does not — mixing the two spaces shifted the
+//      window ~100pt left, placing it at the screen edge.
 //
-//   ❌ AN EARLIER ATTEMPT closed and re-showed the popover on width change.
-//      Even with animates=false, destroy+recreate NSWindow is two separate
-//      WindowServer frames — visible lateral jump. Do not reuse.
+//   ❌ EARLIER ATTEMPT: re-queried button screen coords on every resize.
+//      button.minY is NOT stable across sessions: macOS auto-hides the
+//      menu bar, changing button screen-Y between open/close cycles.
 //
-//   ⚠️  CRITICAL GOTCHA — SIZE OBSERVATION: DO NOT observe size from AppKit.
-//      NSView KVO on `frame` and NSView.frameDidChangeNotification both
-//      silently failed for NSHostingController's root view inside a popover.
-//      Capture size from SwiftUI via GeometryReader + onChange instead —
-//      see setupPopover() below.
+//   ❌ EARLIEST ATTEMPT: close() + show() on width change.
+//      Two WindowServer frames — visible lateral jump.
 //
-//   ⚠️  NEVER call show() without confirming button.bounds is non-zero
-//      first. A degenerate zero-size positioningRect makes show() silently
-//      fail — no crash, no popover.
+//   ⚠️  CRITICAL GOTCHA — SIZE OBSERVATION: observe from SwiftUI only.
+//      NSView KVO / frameDidChangeNotification silently fail inside
+//      NSPopover. Use GeometryReader + onChange (see setupPopover()).
+//
+//   ⚠️  NEVER call show() with a degenerate positioningRect.
 
 import AppKit
 import SwiftUI
@@ -61,13 +60,6 @@ public final class MBKPopoverController: NSObject {
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
-
-    /// Anchor snapshot taken immediately after show() returns.
-    /// sessionAnchorX = window.frame.midX  (horizontal center)
-    /// sessionAnchorY = window.frame.maxY  (top edge — arrow attachment point)
-    /// Both are nil while the popover is closed; cleared in popoverDidClose().
-    private var sessionAnchorX: CGFloat?
-    private var sessionAnchorY: CGFloat?
 
     // MARK: - Init
 
@@ -129,18 +121,7 @@ public final class MBKPopoverController: NSObject {
         guard let rect = positioningRect(for: button) else { return }
         popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
-
-        // Snapshot the anchor immediately after show() — this is the only
-        // moment where AppKit has placed the window correctly and nothing
-        // has mutated it yet. These values are reused for all resize calls
-        // during this open session.
-        if let window = hostingController.view.window {
-            sessionAnchorX = window.frame.midX
-            sessionAnchorY = window.frame.maxY
-            mbkLog("PopoverController", "popover shown — anchor=(\(sessionAnchorX!),\(sessionAnchorY!))")
-        } else {
-            mbkLog("PopoverController", "popover shown")
-        }
+        mbkLog("PopoverController", "popover shown")
         startEventMonitor()
     }
 
@@ -184,12 +165,12 @@ public final class MBKPopoverController: NSObject {
         popover.delegate = self
     }
 
-    /// Applies a new preferred content size, called directly from the
-    /// SwiftUI GeometryReader wrapping the root view (see setupPopover()).
+    /// Applies a new preferred content size.
     ///
-    /// Uses the session anchor snapshot (taken at show() time) to keep the
-    /// window perfectly centered and top-pinned on every resize — no drift,
-    /// no close/reopen, no jump.
+    /// Sets popover.contentSize, then corrects the window origin by the
+    /// size delta so midX and maxY stay pinned — compensating for AppKit's
+    /// default grow-from-bottom-left behaviour without mixing content and
+    /// chrome coordinate spaces.
     private func applyContentSize(_ preferred: CGSize) {
         guard preferred.width > 0, preferred.height > 0 else { return }
         let currentSize = popover.contentSize
@@ -205,25 +186,27 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        guard let anchorX = sessionAnchorX, let anchorY = sessionAnchorY else {
-            // Anchor not yet set (shouldn't happen if show() ran first, but be safe).
-            popover.contentSize = preferred
-            mbkLog("PopoverController", "applyContentSize — no anchor yet, recorded (\(preferred.width),\(preferred.height))")
-            return
-        }
+        // Capture current window origin BEFORE mutating contentSize.
+        // AppKit repositions the window as a side-effect of contentSize change,
+        // so we must read first, then write, then correct.
+        let oldFrame = window.frame
+        let dw = preferred.width - currentSize.width
+        let dh = preferred.height - currentSize.height
 
         mbkLog("PopoverController",
                "applyContentSize — (\(currentSize.width),\(currentSize.height))→"
-               + "(\(preferred.width),\(preferred.height)) anchor=(\(anchorX),\(anchorY))")
+               + "(\(preferred.width),\(preferred.height)) dw=\(dw) dh=\(dh)")
 
         popover.contentSize = preferred
 
-        var frame = window.frame
-        frame.size = preferred
-        frame.origin.x = anchorX - preferred.width / 2
-        frame.origin.y = anchorY - preferred.height
-        window.setFrame(frame, display: true, animate: false)
-        mbkLog("PopoverController", "applyContentSize — frame=\(frame)")
+        // Shift origin to keep midX and maxY fixed:
+        //   origin.x -= dw/2  → window grows/shrinks symmetrically around center
+        //   origin.y -= dh    → window grows/shrinks downward, top edge stays put
+        var newOrigin = oldFrame.origin
+        newOrigin.x -= dw / 2
+        newOrigin.y -= dh
+        window.setFrameOrigin(newOrigin)
+        mbkLog("PopoverController", "applyContentSize — origin set to \(newOrigin)")
     }
 
     // MARK: - Workspace observer
@@ -301,8 +284,6 @@ extension MBKPopoverController: NSPopoverDelegate {
         setButtonHighlight(false)
         stopEventMonitor()
         overlayGate.hasActiveOverlay = false
-        sessionAnchorX = nil
-        sessionAnchorY = nil
         mbkLog("PopoverController", "overlay gate reset on close")
     }
 }
