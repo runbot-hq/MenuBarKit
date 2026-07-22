@@ -11,11 +11,11 @@
 // On every subsequent resize:
 //   1. Compute target frame from contentSize + chromeDelta (no AppKit reads).
 //   2. popover.contentSize = size
-//   3. pw.setFrame(targetFrame, display: true)  — reposition + force repaint
+//   3. Inside NSAnimationContext(duration:0, allowsImplicitAnimation:false):
+//      pw.setFrame(targetFrame, display: true)
 //
-// display:true forces an immediate redraw of the entire window including
-// the arrow chrome, so the arrow is always painted at the correct position.
-// No show(), no orderOut/orderFront — NSPopover internal state is untouched.
+// The animation context suppresses AppKit's implicit window-move animation
+// so the window jumps instantly to the new position with no slide-in.
 
 import AppKit
 import Combine
@@ -179,8 +179,13 @@ public final class MBKPopoverController: NSObject {
                "target=(\(newX),\(newY),\(winW),\(winH))")
 
         popover.contentSize = size
-        // display:true forces immediate repaint of arrow chrome at new position.
-        pw.setFrame(targetFrame, display: true)
+
+        // Suppress AppKit's implicit window-move animation.
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            ctx.allowsImplicitAnimation = false
+            pw.setFrame(targetFrame, display: true)
+        }
 
         mbkLog("PopoverController", "reshowWithSize — pw.frame after=\(pw.frame)")
     }
