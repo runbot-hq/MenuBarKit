@@ -1,13 +1,31 @@
 // SizeReporter.swift
 // MenuBarKit
 //
-// Apply `.mbkReportSize(to:)` once on the root view to forward size changes
-// into MBKPopoverController.sizeRelay:
+// Usage:
+//   1. Create MBKSizeRelay and inject it into the SwiftUI environment
+//   2. Apply .mbkReportSize() to your root view
+//   3. Pass the relay into MBKPopoverController(sizeRelay:)
 //
-//   RootView()
-//       .mbkReportSize(to: popoverController)
+// Example (AppDelegate):
+//   let relay = MBKSizeRelay()
+//   let controller = MBKPopoverController(
+//       rootView: RootView().environment(relay),
+//       sizeRelay: relay, ...
+//   )
 
+import Combine
 import SwiftUI
+
+// MARK: - Relay
+
+/// Observable relay that carries content-size updates from SwiftUI into
+/// `MBKPopoverController`. Create one instance, inject via `.environment()`,
+/// and pass it to the controller.
+@MainActor
+public final class MBKSizeRelay: ObservableObject {
+    public let subject = PassthroughSubject<NSSize, Never>()
+    public init() {}
+}
 
 // MARK: - PreferenceKey
 
@@ -22,7 +40,7 @@ struct MBKSizePreferenceKey: PreferenceKey {
 // MARK: - ViewModifier
 
 struct MBKSizeReporterModifier: ViewModifier {
-    let controller: MBKPopoverController
+    @Environment(MBKSizeRelay.self) private var relay
 
     func body(content: Content) -> some View {
         content
@@ -34,7 +52,7 @@ struct MBKSizeReporterModifier: ViewModifier {
             )
             .onPreferenceChange(MBKSizePreferenceKey.self) { size in
                 guard size.width > 0, size.height > 0 else { return }
-                controller.sizeRelay.send(NSSize(width: size.width, height: size.height))
+                relay.subject.send(NSSize(width: size.width, height: size.height))
             }
     }
 }
@@ -42,9 +60,9 @@ struct MBKSizeReporterModifier: ViewModifier {
 // MARK: - View extension
 
 public extension View {
-    /// Measures this view's size and forwards changes to the given
-    /// `MBKPopoverController` so it can reanchor the popover arrow.
-    func mbkReportSize(to controller: MBKPopoverController) -> some View {
-        modifier(MBKSizeReporterModifier(controller: controller))
+    /// Measures this view's size and forwards changes to the `MBKSizeRelay`
+    /// found in the SwiftUI environment.
+    func mbkReportSize() -> some View {
+        modifier(MBKSizeReporterModifier())
     }
 }

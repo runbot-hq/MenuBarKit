@@ -5,12 +5,10 @@ import MenuBarKit
 import SwiftUI
 
 /// Root container that switches between `MainView` and `SettingsView`.
-/// `.mbkReportSize(to:)` measures the resolved size after each layout pass
-/// and feeds it into `MBKPopoverController.sizeRelay`, which calls
-/// `show(relativeTo:of:preferredEdge:)` again to reanchor the popover arrow.
+/// `.mbkReportSize()` reads size from the environment `MBKSizeRelay` and
+/// forwards it to `MBKPopoverController` to reanchor the popover arrow.
 struct RootView: View {
     @Environment(AppState.self) private var appState
-    let popoverController: MBKPopoverController
 
     var body: some View {
         Group {
@@ -20,6 +18,6 @@ struct RootView: View {
             }
         }
         .id(appState.route)
-        .mbkReportSize(to: popoverController)
+        .mbkReportSize()
     }
 }

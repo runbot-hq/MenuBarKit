@@ -11,16 +11,8 @@
 //   show(relativeTo:of:preferredEdge:)
 // Calling it on an already-visible popover repositions it instantly.
 // We call it every time the content size changes, passing the same 1pt
-// centerRect built from button.bounds.midX — so the arrow always lands on
+// centerRect built from button.bounds.midX so the arrow always lands on
 // the button centre regardless of content width.
-//
-// Sizing signal
-// ─────────────
-// Instead of observing NSHostingController.view.frame (which fires during
-// AppKit's own layout pass at unpredictable times), the SwiftUI content tree
-// uses .mbkReportSize() which reads size via GeometryReader / PreferenceKey
-// and pushes it into MBKPopoverController.sizeRelay.
-// A 16 ms debounce collapses burst layout passes into one call.
 
 import AppKit
 import Combine
@@ -35,11 +27,7 @@ public final class MBKPopoverController: NSObject {
     private let rootView: AnyView
     private let symbolName: String
     private let initialContentSize: NSSize
-
-    // MARK: - Public resize relay
-
-    /// SwiftUI content pushes its measured size here via `.mbkReportSize(to:)`.
-    public let sizeRelay = PassthroughSubject<NSSize, Never>()
+    private let sizeRelay: MBKSizeRelay
 
     // MARK: - Owned objects
 
@@ -56,11 +44,13 @@ public final class MBKPopoverController: NSObject {
     public init<Content: View>(
         rootView: Content,
         overlayGate: MBKOverlayGate,
+        sizeRelay: MBKSizeRelay,
         symbolName: String = "menubar.rectangle",
         contentSize: NSSize = NSSize(width: 320, height: 300)
     ) {
         self.rootView = AnyView(rootView)
         self.overlayGate = overlayGate
+        self.sizeRelay = sizeRelay
         self.symbolName = symbolName
         self.initialContentSize = contentSize
     }
@@ -126,34 +116,26 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Size relay
 
     private func setupSizeRelay() {
-        resizeSubscription = sizeRelay
+        resizeSubscription = sizeRelay.subject
             .debounce(for: .milliseconds(16), scheduler: RunLoop.main)
             .sink { [weak self] newSize in
                 self?.reshowWithSize(newSize)
             }
     }
 
-    /// Sets a new content size and immediately calls show() to atomically
-    /// reanchor the arrow. This is the only reliable way to keep the arrow
-    /// centered after a content-size change on macOS.
     private func reshowWithSize(_ size: NSSize) {
         guard popover.isShown else { return }
         guard size.width > 0, size.height > 0 else { return }
         guard let button = statusItem.button,
               let buttonWin = button.window else { return }
-
         let buttonY = buttonWin.frame.origin.y
         let screenH = buttonWin.screen?.frame.height ?? -1
         guard screenH < 0 || buttonY < screenH else {
             mbkLog("PopoverController", "reshowWithSize — menu bar hidden, skipping")
             return
         }
-
         let current = popover.contentSize
-        guard abs(current.width - size.width) > 1 || abs(current.height - size.height) > 1 else {
-            return
-        }
-
+        guard abs(current.width - size.width) > 1 || abs(current.height - size.height) > 1 else { return }
         mbkLog("PopoverController",
                "reshowWithSize — (\(size.width),\(size.height)) prev=(\(current.width),\(current.height))")
         popover.contentSize = size
