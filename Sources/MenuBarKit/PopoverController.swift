@@ -137,20 +137,30 @@
 //   automatically on every SwiftUI preferredContentSize KVO change — e.g. when
 //   the host app switches routes (main <-> settings). This is the trigger.
 //
-//   IMPORTANT — what does NOT work as a signal:
-//     button.window.screen == nil  ← WRONG. Screen association is retained
-//     even while the menubar is hidden.
+//   CORRECT isMenuBarHidden signal:
+//     screenH < 0 || buttonY >= screenH
 //
-//   CORRECT signal: buttonWin.frame.origin.y >= buttonScreen.frame.height
-//     Observed: buttonY=982, screenH=982 when hidden.
-//     Observed: buttonY=949, screenH=982 when visible.
+//   screenH < 0 means button.window.screen returned nil — which itself signals
+//   the button window has been slid off-screen by the Dock. buttonY >= screenH
+//   is the normal case where screen is still associated but the origin is at or
+//   beyond the screen height.
+//
+//   WRONG signals (do not use):
+//     button.window.screen == nil alone  ← misses the buttonY >= screenH case
+//     buttonScreen != nil && buttonY >= screenH  ← misses the screen==nil case
+//       (screen CAN go nil; when it does screenH=-1, the && short-circuits to
+//        false and the guard fails — side-jump happens)
+//
+//   Observed values:
+//     Hidden:  buttonY=982, screenH=982  OR  buttonY=-1, screenH=-1 (screen nil)
+//     Visible: buttonY=949, screenH=982
 //
 //   Fix: replace sizingOptions = .preferredContentSize with a manual KVO
 //   observer on preferredContentSize. The observer checks isMenuBarHidden
 //   before writing contentSize. When hidden the write is skipped — the current
 //   size is already correct (SwiftUI laid out fine). The next KVO fire after
 //   the menubar re-appears has a valid button position and writes normally.
-//   See runbot-hq/run-bot#2237.
+//   See runbot-hq/run-bot#2239.
 
 import AppKit
 import SwiftUI
@@ -312,7 +322,7 @@ public final class MBKPopoverController: NSObject {
     /// This replaces `sizingOptions = .preferredContentSize`. Both approaches
     /// update `popover.contentSize` when SwiftUI's layout changes, but the
     /// manual observer lets us guard the write when the auto-hide menubar is
-    /// hidden (buttonY >= screenH), preventing the side-jump.
+    /// hidden (screenH < 0 || buttonY >= screenH), preventing the side-jump.
     ///
     /// See SIDE-JUMP UNDER AUTO-HIDE MENUBAR in the file header.
     private func setupSizeObserver() {
@@ -330,8 +340,12 @@ public final class MBKPopoverController: NSObject {
     /// side-jump when the auto-hide menubar is hidden.
     ///
     /// Called from the `preferredContentSize` KVO observer.
-    /// The write is skipped when `buttonWin.frame.origin.y >= screen.frame.height`
-    /// — the signal that the Dock has pushed the NSStatusItem window off-screen.
+    /// The write is skipped when `screenH < 0 || buttonY >= screenH`:
+    ///   - `screenH < 0` means `button.window.screen` is nil — the button window
+    ///     has been slid off the screen edge by the Dock (screen association dropped).
+    ///   - `buttonY >= screenH` is the normal hidden case where screen is still
+    ///     associated but the window origin is at or beyond screen height.
+    /// Either condition means AppKit's anchor geometry is invalid; skip the write.
     /// See SIDE-JUMP UNDER AUTO-HIDE MENUBAR in the file header.
     private func applyPreferredContentSize(_ preferred: NSSize) {
         guard popover.isShown else {
@@ -349,7 +363,11 @@ public final class MBKPopoverController: NSObject {
         let buttonScreen = buttonWin?.screen
         let buttonY = buttonWinFrame?.origin.y ?? -1
         let screenH = buttonScreen?.frame.height ?? -1
-        let isMenuBarHidden = buttonScreen != nil && buttonY >= screenH
+        // fix/side-jump-autohide: screenH < 0 means screen==nil (button off-screen);
+        // buttonY >= screenH is the normal hidden case. Both mean skip the write.
+        // ❌ Do NOT use `buttonScreen != nil && buttonY >= screenH` — that expression
+        //    evaluates false when screen is nil, allowing the write and causing side-jump.
+        let isMenuBarHidden = screenH < 0 || buttonY >= screenH
         mbkLog("PopoverController",
                "applyPreferredContentSize — "
                + "preferred=(\(preferred.width),\(preferred.height)) "
@@ -359,16 +377,10 @@ public final class MBKPopoverController: NSObject {
                + "buttonScreen=\(String(describing: buttonScreen?.frame)) "
                + "buttonY=\(buttonY) screenH=\(screenH) "
                + "isMenuBarHidden=\(isMenuBarHidden)")
-        // fix/side-jump-autohide: skip write when menubar is hidden.
-        // buttonWin.frame.origin.y >= screen.frame.height means the Dock has
-        // slid the NSStatusItem window off the top edge. Any contentSize write
-        // in this state causes AppKit anchor geometry to collapse to x=0.
-        // NOTE: button.window.screen == nil is NOT the correct signal — the
-        // screen association is kept even when the menubar is hidden.
         guard !isMenuBarHidden else {
             mbkLog("PopoverController",
                    "applyPreferredContentSize — SKIP: isMenuBarHidden=true "
-                   + "(buttonY=\(buttonY) >= screenH=\(screenH))")
+                   + "(screenH=\(screenH) buttonY=\(buttonY))")
             return
         }
         guard abs(currentSize.width - preferred.width) > 1
