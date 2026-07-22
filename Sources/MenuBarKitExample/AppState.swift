@@ -11,6 +11,7 @@
 //   showSheetAlert  — drives the .alert modifier in SheetView (sheet level).
 
 import Foundation
+import MenuBarKit
 import Observation
 
 /// Navigation destinations for the example app's root view switcher.
@@ -25,9 +26,14 @@ enum Route: Equatable {
 @Observable
 @MainActor
 final class AppState {
+    /// Size relay reference — injected after init so route willSet can freeze the window.
+    var sizeRelay: MBKSizeRelay?
+
     /// Currently displayed route.
+    /// willSet freezes the popover window so the wrong-size layout pass is never visible.
     var route: Route = .main {
-        didSet { print("[AppState] route: \(oldValue) → \(self.route)") }
+        willSet { sizeRelay?.freezeForRouteChange() }
+        didSet  { print("[AppState] route: \(oldValue) → \(self.route)") }
     }
     /// URL selected by the file picker opened from SettingsView (popover context). nil until first pick.
     var pickedURL: URL?
