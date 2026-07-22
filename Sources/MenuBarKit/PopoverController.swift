@@ -19,68 +19,101 @@
 //   popoverShouldClose returns false (via overlayGate.hasActiveOverlay), and
 //   the workspace observer skips performClose while any overlay is active.
 //
+//   This is the simpler behaviour: the user's mental model is "sheet is
+//   blocking, nothing else happens until I dismiss it." No hide-and-restore
+//   cycle to reason about.
+//
 // USAGE:
 //   1. Create a MBKPopoverController with your root SwiftUI view and an
 //      MBKOverlayGate instance.
-//   2. Call `setup()` from applicationDidFinishLaunching.
+//   2. Call `setup()` from applicationDidFinishLaunching — see setup() doc
+//      comment for the strict ordering requirement.
 //
 // DISMISS GATE CONTRACT:
-//   popoverShouldClose reads overlayGate.hasActiveOverlay.
+//   popoverShouldClose reads overlayGate.hasActiveOverlay. MBKAnchoredSheet
+//   and mbkOpenFilePicker manage the gate automatically — the host app never
+//   needs to touch it directly.
 //
 // OUTSIDE-CLICK MONITOR:
-//   Started when the popover opens, stopped when it closes.
+//   Started when the popover opens, stopped when it closes. Never leaks a
+//   persistent global listener.
 //
-// WORKSPACE OBSERVER — why queue: nil + Task { @MainActor }:
-//   queue: nil delivers on the poster's thread; Task { @MainActor } is the
-//   Swift 6-correct hop to the main actor — compiler-enforced.
+// WORKSPACE OBSERVER — why queue: nil + Task { @MainActor } (not queue: .main):
+//   queue: nil delivers on the poster's thread; Task { @MainActor } is then
+//   the Swift 6-correct hop to the main actor — compiler-enforced, not
+//   asserted.
+//
+// WORKSPACE OBSERVER — performClose on already-closed popover:
+//   NSPopover.performClose on a closed popover is a documented no-op.
+//   The guard self.popover.isShown makes the intent explicit.
 //
 // IMPLICIT-UNWRAPPED OPTIONALS (statusItem, popover, hostingController):
-//   Assigned in setup(), not init(). Safe because setup() is called from
-//   applicationDidFinishLaunching before any user interaction.
+//   Assigned in setup(), not init(). Safe because setup() must be called
+//   from applicationDidFinishLaunching before any user interaction.
 //   ❌ Do NOT replace with optionals without restructuring to init-time wiring.
 //
 // nonisolated(unsafe) — eventMonitor AND workspaceObserver:
-//   Both hold non-Sendable AppKit tokens. Every live access is @MainActor.
-//   Safe under singleton-lifetime assumption.
+//   Both hold non-Sendable AppKit tokens. Every live read/write is
+//   @MainActor-isolated. Safe under singleton-lifetime assumption.
+//   ❌ Do NOT add @unchecked Sendable as a workaround.
 //
 // deinit TEARDOWN:
-//   Do NOT wrap removals in Task { @MainActor } — use-after-free.
+//   Safe under singleton-lifetime assumption — deinit runs after all
+//   @MainActor work completes. Do NOT wrap removals in Task { @MainActor }
+//   — that would be use-after-free.
 //
-// ARROW CENTERING — direct window frame adjustment:
-//   NSPopover.show(relativeTo:of:preferredEdge:) positions the popover so
-//   the arrow points at the positioningRect, but then shifts the window
-//   leftward to keep it on-screen. This makes the arrow appear off-center
-//   relative to the popover body when the popover is wide.
+// ARROW CENTERING — 1pt positioningRect + re-anchor on resize:
+//   NSPopover.show(relativeTo:of:preferredEdge:) anchors the arrow to the
+//   midX of the positioningRect and centers the popover body on that point.
+//   Passing button.bounds causes AppKit to shift the popover leftward to
+//   keep it on-screen, making the arrow appear off-center relative to the
+//   popover body.
 //
-//   show() on an already-shown popover is ignored by AppKit — it does NOT
-//   reposition the window. So calling show() again after contentSize write
-//   does nothing.
+//   Open fix: pass a 1pt-wide rect at button.bounds.midX. AppKit centers
+//   the popover on that point, arrow appears at top-center.
 //
-//   Correct fix: after show() (and after contentSize write), directly set
-//   popover window frame.origin.x in screen coordinates so the window is
-//   horizontally centered under the status bar button. The button midX in
-//   screen coords is:
-//     buttonMidXScreen = buttonWinFrame.origin.x + button.frame.midX
-//   Then:
-//     popoverWindow.origin.x = buttonMidXScreen - popoverWindow.frame.width / 2
-//   Clamp to screen bounds so we never push off-screen.
+//   Resize fix: after writing contentSize, AppKit re-runs anchor geometry
+//   using its INTERNALLY STORED positioningRect (button.bounds, not our
+//   1pt rect) — so the popover shifts off-center on every width change.
+//   Fix: call show() again with the 1pt center rect immediately after
+//   writing contentSize. show() on an already-shown NSPopover is a silent
+//   reposition — no re-open animation, no flash.
 //
-//   After the initial show(), the window frame isn't final until after the
-//   run loop tick, so we defer with DispatchQueue.main.async.
-//   After a contentSize write the frame IS updated synchronously, so we
-//   can center immediately.
+//   centerRect(for:) is a shared helper used by both openPopover() and
+//   applyContentSize(_:).
+//
+// SIZE OBSERVATION — why observe view.frame and read fittingSize:
+//   preferredContentSize on NSHostingController is only recomputed when
+//   sizingOptions includes .preferredContentSize. With sizingOptions empty
+//   (required to prevent the side-jump), preferredContentSize never changes
+//   and KVO on it never fires.
+//
+//   The hosting view's frame IS updated live by SwiftUI on every layout pass
+//   regardless of sizingOptions, making it the correct signal to observe.
+//
+//   However, view.frame fires during intermediate layout passes where the
+//   frame may not yet be fully settled. Reading view.frame.size at that
+//   moment gives a partially-settled value. Instead we read
+//   hostingController.view.fittingSize inside the Task hop — fittingSize
+//   asks AppKit for the view's ideal size given its current constraints and
+//   is always the fully-settled value.
 //
 // SIDE-JUMP UNDER AUTO-HIDE MENUBAR (HIDDEN STATE) — fix/side-jump-autohide:
 //   When macOS auto-hide menubar is hidden the Dock pushes the NSStatusItem
 //   button window off the top edge: buttonWin.frame.origin.y >= screen.frame.height.
-//   In this state ANY contentSize write causes AppKit to collapse the popover
+//   In this state ANY contentSize write causes AppKit to re-run full anchor
+//   geometry against the off-screen button position, collapsing the popover
 //   x-origin to 0 (side-jump).
 //
-//   Fix: observe hostingController.view \.frame (updated live by SwiftUI).
-//   Guard the contentSize write with isMenuBarHidden. Skip when hidden.
+//   CORRECT isMenuBarHidden signal:
+//     screenH < 0 || buttonY >= screenH
 //
-//   CORRECT isMenuBarHidden signal: screenH < 0 || buttonY >= screenH
-//   ❌ Do NOT use buttonScreen != nil && buttonY >= screenH.
+//   screenH < 0 → button.window.screen == nil (button slid off-screen).
+//   buttonY >= screenH → normal hidden case, screen still associated.
+//
+//   WRONG signals (do not use):
+//     button.window.screen == nil alone  ← misses buttonY >= screenH case
+//     buttonScreen != nil && buttonY >= screenH  ← misses screen==nil case
 //
 //   See runbot-hq/run-bot#2239.
 
@@ -103,7 +136,11 @@ public final class MBKPopoverController: NSObject {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var hostingController: NSHostingController<AnyView>!
+
+    /// KVO token for `hostingController.view.frame`.
+    /// See SIZE OBSERVATION in the file header.
     private var sizeObservation: NSKeyValueObservation?
+
     private var isSetUp = false
 
     nonisolated(unsafe) private var eventMonitor: Any?
@@ -155,64 +192,39 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
+    /// Shows the popover centered under the status-bar button.
+    /// Uses a 1pt-wide positioningRect at button midX — see ARROW CENTERING in file header.
     private func openPopover() {
         guard let button = statusItem.button else { return }
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.show(relativeTo: centerRect(for: button), of: button, preferredEdge: .minY)
         // ❌ DO NOT replace with NSApp.activate() (no-arg, macOS 14+ form) —
         // causes popover window to flicker. ignoringOtherApps: true must stay.
         NSApp.activate(ignoringOtherApps: true)
         mbkLog("PopoverController", "popover shown")
         startEventMonitor()
-        // Defer centering by one run loop tick — the popover window frame is
-        // not final until after show() returns and the run loop processes it.
-        // See ARROW CENTERING in the file header.
-        DispatchQueue.main.async { [weak self] in
-            self?.centerPopoverWindow()
-        }
+    }
+
+    /// Returns a 1pt-wide rect at the horizontal center of the button's bounds.
+    /// Passed as positioningRect to show() so AppKit centers the popover and
+    /// its arrow under the button. Also called after contentSize writes to
+    /// re-anchor. See ARROW CENTERING in file header.
+    private func centerRect(for button: NSButton) -> NSRect {
+        let midX = button.bounds.midX
+        return NSRect(x: midX - 0.5, y: button.bounds.minY,
+                      width: 1, height: button.bounds.height)
     }
 
     private func setButtonHighlight(_ on: Bool) {
         statusItem.button?.isHighlighted = on
     }
 
-    // MARK: - Popover window centering
-
-    /// Centers the popover window horizontally under the status bar button
-    /// by directly adjusting the window's screen-coordinate origin.
-    ///
-    /// show() shifts the popover leftward to keep it on-screen, making the
-    /// arrow appear off-center. We correct this by computing where the popover
-    /// window's left edge should be for perfect centering under the button,
-    /// then clamping to screen bounds.
-    ///
-    /// See ARROW CENTERING in the file header.
-    private func centerPopoverWindow() {
-        guard let button = statusItem.button,
-              let buttonWin = button.window,
-              let popoverWin = popover.contentViewController?.view.window,
-              let screen = buttonWin.screen ?? NSScreen.main else { return }
-
-        // Button midX in screen coordinates.
-        let buttonFrameInScreen = buttonWin.convertToScreen(button.convert(button.bounds, to: nil))
-        let buttonMidX = buttonFrameInScreen.midX
-
-        // Desired popover origin: centered under button, clamped to screen.
-        let popW = popoverWin.frame.width
-        let screenMinX = screen.visibleFrame.minX
-        let screenMaxX = screen.visibleFrame.maxX
-        let desiredX = (buttonMidX - popW / 2)
-            .clamped(to: screenMinX...(screenMaxX - popW))
-
-        var newFrame = popoverWin.frame
-        newFrame.origin.x = desiredX
-        popoverWin.setFrameOrigin(newFrame.origin)
-        mbkLog("PopoverController", "centerPopoverWindow — buttonMidX=\(buttonMidX) popW=\(popW) desiredX=\(desiredX)")
-    }
-
     // MARK: - Popover setup
 
+    /// ❌ Do NOT set sizingOptions = .preferredContentSize — causes side-jump.
+    /// Manual KVO on view.frame + isMenuBarHidden guard is used instead.
     private func setupPopover() {
         hostingController = NSHostingController(rootView: rootView)
+        // ❌ Do NOT restore sizingOptions = .preferredContentSize — see file header.
         popover = NSPopover()
         popover.contentViewController = hostingController
         popover.contentSize = contentSize
@@ -224,24 +236,46 @@ public final class MBKPopoverController: NSObject {
 
     // MARK: - Hosting view frame observer
 
+    /// Observes `hostingController.view.frame` to drive `popover.contentSize`.
+    ///
+    /// We observe view.frame (not preferredContentSize) because preferredContentSize
+    /// is only recomputed when sizingOptions includes .preferredContentSize — which
+    /// we cannot use (causes side-jump). view.frame is updated live by SwiftUI.
+    ///
+    /// We read view.fittingSize inside the Task hop, not view.frame.size, because
+    /// view.frame fires during intermediate layout passes. fittingSize is always
+    /// the fully-settled ideal size. See SIZE OBSERVATION in file header.
     private func setupSizeObserver() {
         sizeObservation = hostingController.view.observe(
             \.frame,
             options: [.new]
-        ) { [weak self] view, _ in
+        ) { [weak self] _, _ in
             Task { @MainActor [weak self] in
-                self?.applyPreferredContentSize(view.frame.size)
+                guard let self else { return }
+                // Read fittingSize, not the KVO new value — see SIZE OBSERVATION.
+                let settled = self.hostingController.view.fittingSize
+                self.applyContentSize(settled)
             }
         }
     }
 
-    private func applyPreferredContentSize(_ preferred: NSSize) {
+    /// Writes a new contentSize to the popover and re-anchors it so the arrow
+    /// stays centered. Skipped when the auto-hide menubar is hidden.
+    ///
+    /// Re-anchor: after writing contentSize, AppKit re-runs anchor geometry
+    /// using its internally stored positioningRect (button.bounds), not our
+    /// 1pt center rect — so the arrow drifts. Calling show() again with the
+    /// 1pt center rect immediately after the write forces correct centering.
+    /// show() on an already-shown popover is a silent reposition.
+    ///
+    /// See ARROW CENTERING and SIDE-JUMP in file header.
+    private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else {
-            mbkLog("PopoverController", "applyPreferredContentSize — popover not shown, skipping")
+            mbkLog("PopoverController", "applyContentSize — popover not shown, skipping")
             return
         }
         guard preferred.width > 0, preferred.height > 0 else {
-            mbkLog("PopoverController", "applyPreferredContentSize — zero size, skipping")
+            mbkLog("PopoverController", "applyContentSize — zero size (\(preferred.width),\(preferred.height)), skipping")
             return
         }
         let currentSize = popover.contentSize
@@ -250,29 +284,35 @@ public final class MBKPopoverController: NSObject {
         let buttonScreen = buttonWin?.screen
         let buttonY = buttonWinFrame?.origin.y ?? -1
         let screenH = buttonScreen?.frame.height ?? -1
+        // fix/side-jump-autohide: screenH < 0 means screen==nil (button off-screen);
+        // buttonY >= screenH is the normal hidden case. Both mean skip the write.
+        // ❌ Do NOT use `buttonScreen != nil && buttonY >= screenH`.
         let isMenuBarHidden = screenH < 0 || buttonY >= screenH
         mbkLog("PopoverController",
-               "applyPreferredContentSize — "
+               "applyContentSize — "
                + "preferred=(\(preferred.width),\(preferred.height)) "
                + "current=(\(currentSize.width),\(currentSize.height)) "
-               + "buttonY=\(buttonY) screenH=\(screenH) isMenuBarHidden=\(isMenuBarHidden)")
+               + "buttonY=\(buttonY) screenH=\(screenH) "
+               + "isMenuBarHidden=\(isMenuBarHidden)")
         guard !isMenuBarHidden else {
-            mbkLog("PopoverController", "applyPreferredContentSize — SKIP: isMenuBarHidden=true")
+            mbkLog("PopoverController", "applyContentSize — SKIP: isMenuBarHidden=true")
             return
         }
         guard abs(currentSize.width - preferred.width) > 1
                 || abs(currentSize.height - preferred.height) > 1 else {
-            mbkLog("PopoverController", "applyPreferredContentSize — no-op: size unchanged")
+            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
             return
         }
         mbkLog("PopoverController",
-               "applyPreferredContentSize — WRITING (\(preferred.width),\(preferred.height)) "
+               "applyContentSize — WRITING (\(preferred.width),\(preferred.height)) "
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
         popover.contentSize = preferred
-        // Re-center the window after the size write. The frame updates
-        // synchronously so we can center immediately.
-        centerPopoverWindow()
-        mbkLog("PopoverController", "applyPreferredContentSize — done")
+        // Re-anchor with 1pt center rect so arrow stays centered after resize.
+        // See ARROW CENTERING in file header.
+        if let button = statusItem.button {
+            popover.show(relativeTo: centerRect(for: button), of: button, preferredEdge: .minY)
+        }
+        mbkLog("PopoverController", "applyContentSize — done")
     }
 
     // MARK: - Workspace observer
@@ -331,14 +371,6 @@ public final class MBKPopoverController: NSObject {
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
         }
-    }
-}
-
-// MARK: - Comparable clamped helper
-
-private extension Comparable {
-    func clamped(to range: ClosedRange<Self>) -> Self {
-        min(max(self, range.lowerBound), range.upperBound)
     }
 }
 
