@@ -15,6 +15,6 @@ struct MainView: View {
                 .buttonStyle(.borderedProminent)
         }
         .padding(16)
-        .frame(width: 260)
+        .frame(minWidth: 260)
     }
 }
