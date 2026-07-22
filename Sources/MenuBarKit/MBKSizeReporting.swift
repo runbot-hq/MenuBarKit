@@ -24,7 +24,13 @@
 import SwiftUI
 
 private struct MBKSizeKey: PreferenceKey {
-    static var defaultValue: CGSize = .zero
+    // `static let`, not `static var` — Swift 6 strict concurrency checking
+    // flags a mutable static property on a nonisolated type as unsafe
+    // global shared mutable state. PreferenceKey.defaultValue is never
+    // actually mutated at runtime (SwiftUI only ever reads it), so a
+    // constant satisfies both the protocol requirement and the
+    // concurrency checker.
+    static let defaultValue: CGSize = .zero
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
         value = nextValue()
     }
