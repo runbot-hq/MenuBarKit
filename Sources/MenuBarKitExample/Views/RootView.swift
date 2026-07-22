@@ -1,18 +1,25 @@
 // RootView.swift
 // MenuBarKitExample
-
+//
+// Root container that switches between `MainView` and `SettingsView`
+// based on `AppState.route`.
+//
+// SIZING: explicit, not measured. Every route change calls
+// sizingBridge.setContentSize(appState.route.contentSize) directly —
+// there is no GeometryReader, no fittingSize, no PreferenceKey anywhere
+// in this file. See PopoverController.swift's header and
+// AppState.swift's Route.contentSize for why measurement-based sizing
+// was abandoned entirely. This is the ONE place the example app tells
+// MenuBarKit how big the popover should be, and it does so on:
+//   - onAppear (initial route)
+//   - onChange(of: appState.route) (every subsequent route change)
 import SwiftUI
 
-/// Root container that switches between `MainView` and `SettingsView`
-/// based on `AppState.route`.
-///
-/// `.id(appState.route)` forces SwiftUI to destroy and recreate the view
-/// on every route change rather than updating in place. Without it, SwiftUI
-/// reuses the same view identity and never issues a new preferredContentSize
-/// measurement, so the popover size stays frozen at the first route's size.
 struct RootView: View {
     /// App state injected from the environment.
     @Environment(AppState.self) private var appState
+    /// Bridge used to explicitly declare popover content size per route.
+    @Environment(SizingBridge.self) private var sizingBridge
 
     /// Renders `MainView` or `SettingsView` depending on the current route.
     var body: some View {
@@ -23,18 +30,15 @@ struct RootView: View {
             }
         }
         .id(appState.route)
-        .background(
-            GeometryReader { geo in
-                Color.clear
-                    .onAppear {
-                        print("[RootView] GeometryReader onAppear size=(\(geo.size.width),\(geo.size.height)) route=\(appState.route)")
-                    }
-                    .onChange(of: geo.size) { old, new in
-                        print("[RootView] size changed (\(old.width),\(old.height)) → (\(new.width),\(new.height)) route=\(appState.route)")
-                    }
-            }
-        )
-        .onAppear  { print("[RootView] onAppear  route=\(appState.route)") }
+        .onAppear {
+            print("[RootView] onAppear  route=\(appState.route)")
+            sizingBridge.setContentSize(appState.route.contentSize)
+        }
         .onDisappear { print("[RootView] onDisappear route=\(appState.route)") }
+        .onChange(of: appState.route) { oldRoute, newRoute in
+            let size = newRoute.contentSize
+            print("[RootView] route changed \(oldRoute) → \(newRoute), declaring size (\(size.width),\(size.height))")
+            sizingBridge.setContentSize(size)
+        }
     }
 }
