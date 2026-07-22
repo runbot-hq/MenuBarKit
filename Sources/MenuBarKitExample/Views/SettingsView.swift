@@ -15,6 +15,8 @@
 //     .mbkAlert wraps .alert() and manages the overlay gate automatically,
 //     preventing the outside-click monitor and workspace observer from
 //     closing the popover while the alert is on screen.
+//
+// NOTE: width=560 intentionally wide for arrow-centering regression testing.
 
 import MenuBarKit
 import SwiftUI
@@ -37,7 +39,6 @@ struct SettingsView: View {
             Divider()
 
             // Scenario 1
-            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
             Button("Open sheet") { showSheet = true }
                 .mbkSheet(isPresented: $showSheet, overlayGate: overlayGate) {
                     SheetView()
@@ -46,7 +47,6 @@ struct SettingsView: View {
                 }
 
             // Scenario 2
-            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
             Button("Pick folder (popover)") {
                 mbkOpenFilePicker(target: .popover, overlayGate: overlayGate) { url in
                     appState.pickedURL = url
@@ -59,7 +59,6 @@ struct SettingsView: View {
             }
 
             // Scenario 3
-            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
             GroupBox("Alert from popover") {
                 Button("Show alert") { appState.showAlert = true }
                 Text("Alert should appear. Popover stays alive.")
@@ -79,7 +78,7 @@ struct SettingsView: View {
             Button("← Back") { appState.route = .main }
         }
         .padding(16)
-        .frame(width: 320)
+        .frame(width: 560)  // wide: makes arrow misalignment obvious during testing
         .onAppear    { print("[SettingsView] onAppear") }
         .onDisappear { print("[SettingsView] onDisappear") }
     }
