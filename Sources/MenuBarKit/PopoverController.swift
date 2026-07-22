@@ -7,20 +7,14 @@
 // at show() time. Every contentSize write causes AppKit to recompute x from
 // that stale anchor, undoing any manual correction.
 //
-// The only API that atomically resets both size AND anchor is
-//   show(relativeTo:of:preferredEdge:)
-// Calling it on an already-visible popover repositions it instantly.
-// We call it on every content-size change, passing the same 1pt centerRect
-// built from button.bounds.midX so the arrow always lands on the button
-// centre regardless of content width.
+// The only API that atomically resets the x anchor is show(relativeTo:of:preferredEdge:).
+// We call it on every content-size change with a 1pt centerRect at button
+// midX so the arrow always lands on the button centre.
 //
-// show() also recalculates y. To avoid a vertical jump we capture y before
-// the call and restore it immediately after.
-//
-// Sizing signal
-// ─────────────
-// .mbkReportSize() (GeometryReader + PreferenceKey) pushes sizes into
-// MBKSizeRelay.subject. A 16 ms debounce collapses burst layout passes.
+// show() also recalculates y. We correct this by pinning the top edge:
+//   topEdge = pw.frame.maxY   (captured before show — constant, just below menu bar)
+//   after show: pw.frame.origin.y = topEdge - newHeight
+// This is correct for any content height without any geometry arithmetic.
 
 import AppKit
 import Combine
@@ -150,20 +144,23 @@ public final class MBKPopoverController: NSObject {
         mbkLog("PopoverController",
                "reshowWithSize — (\(size.width),\(size.height)) prev=(\(current.width),\(current.height))")
 
-        // Capture y before show() so we can restore it.
-        // show() recalculates the full window position; x is correct (anchored
-        // to button midX) but y may drift. We keep the y AppKit chose at the
-        // original openPopover() call.
-        let previousY = popover.contentViewController?.view.window?.frame.origin.y
+        // Capture the top edge (maxY) before show(). This is the fixed point—
+        // just below the menu bar — and never changes between resizes.
+        let pw = popover.contentViewController?.view.window
+        let topEdge = pw?.frame.maxY
 
         popover.contentSize = size
         popover.show(relativeTo: centerRect(for: button), of: button, preferredEdge: .minY)
 
+        // Pin y so the top edge stays fixed regardless of new content height.
+        // x is left as AppKit computed it (correctly anchored to button midX).
         if let pw = popover.contentViewController?.view.window,
-           let y = previousY {
-            if pw.frame.origin.y != y {
-                mbkLog("PopoverController", "reshowWithSize — restoring y \(pw.frame.origin.y) → \(y)")
-                pw.setFrameOrigin(NSPoint(x: pw.frame.origin.x, y: y))
+           let top = topEdge {
+            let newY = top - pw.frame.height
+            if abs(pw.frame.origin.y - newY) > 0.5 {
+                mbkLog("PopoverController",
+                       "reshowWithSize — pinning y \(pw.frame.origin.y) → \(newY) (topEdge=\(top))")
+                pw.setFrameOrigin(NSPoint(x: pw.frame.origin.x, y: newY))
             }
         }
     }
