@@ -1,20 +1,23 @@
 // PopoverController.swift
 // MenuBarKit
 //
-// Arrow centering strategy
-// ────────────────────────
-// setFrameOrigin / contentSize alone fight AppKit's internal anchor stored
-// at show() time. Every contentSize write causes AppKit to recompute x from
-// that stale anchor, undoing any manual correction.
+// Resize strategy (nuclear)
+// ─────────────────────
+// show() on a visible popover recalculates the full window position including
+// arrow+chrome geometry we cannot reliably cancel. Every attempt to fix the
+// drift post-show() has failed because the chrome height is opaque.
 //
-// The only API that atomically resets the x anchor is show(relativeTo:of:preferredEdge:).
-// We call it on every content-size change with a 1pt centerRect at button
-// midX so the arrow always lands on the button centre.
+// Instead we bypass show() for resize entirely:
 //
-// show() also recalculates y. We correct this by pinning the top edge:
-//   topEdge = pw.frame.maxY   (captured before show — constant, just below menu bar)
-//   after show: pw.frame.origin.y = topEdge - newHeight
-// This is correct for any content height without any geometry arithmetic.
+//   1. openPopover()  — show() as normal; AppKit places window correctly.
+//      Capture topEdge = pw.frame.maxY and buttonMidXScreen from the button.
+//
+//   2. reshowWithSize()  — write contentSize only, then setFrame directly:
+//        newWinW = pw.frame.width   (AppKit updated chrome width)
+//        newWinH = pw.frame.height  (AppKit updated chrome height)
+//        x = buttonMidXScreen - newWinW / 2
+//        y = topEdge - newWinH
+//      This is pixel-exact: arrow centred, top edge pinned, zero drift.
 
 import AppKit
 import Combine
@@ -30,6 +33,13 @@ public final class MBKPopoverController: NSObject {
     private let symbolName: String
     private let initialContentSize: NSSize
     private let sizeRelay: MBKSizeRelay
+
+    // MARK: - Anchor (captured after initial show)
+
+    /// Screen x of the centre of the status item button.
+    private var buttonMidXScreen: CGFloat = 0
+    /// Top edge of the popover window (maxY). Fixed point just below menu bar.
+    private var popoverTopEdge: CGFloat = 0
 
     // MARK: - Owned objects
 
@@ -99,7 +109,18 @@ public final class MBKPopoverController: NSObject {
         }
         popover.show(relativeTo: centerRect(for: button), of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
-        mbkLog("PopoverController", "popover shown")
+
+        // Capture anchor after show() so all geometry is final.
+        if let pw = popover.contentViewController?.view.window,
+           let buttonWin = button.window {
+            popoverTopEdge = pw.frame.maxY
+            // Convert button midX to screen coordinates.
+            let buttonMidInWin = NSPoint(x: button.frame.midX, y: button.frame.midY)
+            let buttonMidScreen = buttonWin.convertPoint(toScreen: buttonMidInWin)
+            buttonMidXScreen = buttonMidScreen.x
+            mbkLog("PopoverController",
+                   "popover shown — topEdge=\(popoverTopEdge) buttonMidXScreen=\(buttonMidXScreen)")
+        }
         startEventMonitor()
     }
 
@@ -141,28 +162,26 @@ public final class MBKPopoverController: NSObject {
         let current = popover.contentSize
         guard abs(current.width - size.width) > 1 || abs(current.height - size.height) > 1 else { return }
 
+        guard let pw = popover.contentViewController?.view.window else { return }
+        guard popoverTopEdge > 0, buttonMidXScreen > 0 else { return }
+
         mbkLog("PopoverController",
                "reshowWithSize — (\(size.width),\(size.height)) prev=(\(current.width),\(current.height))")
 
-        // Capture the top edge (maxY) before show(). This is the fixed point—
-        // just below the menu bar — and never changes between resizes.
-        let pw = popover.contentViewController?.view.window
-        let topEdge = pw?.frame.maxY
-
+        // Write the new content size. AppKit immediately resizes the window
+        // chrome to match — pw.frame reflects the new total window size.
         popover.contentSize = size
-        popover.show(relativeTo: centerRect(for: button), of: button, preferredEdge: .minY)
 
-        // Pin y so the top edge stays fixed regardless of new content height.
-        // x is left as AppKit computed it (correctly anchored to button midX).
-        if let pw = popover.contentViewController?.view.window,
-           let top = topEdge {
-            let newY = top - pw.frame.height
-            if abs(pw.frame.origin.y - newY) > 0.5 {
-                mbkLog("PopoverController",
-                       "reshowWithSize — pinning y \(pw.frame.origin.y) → \(newY) (topEdge=\(top))")
-                pw.setFrameOrigin(NSPoint(x: pw.frame.origin.x, y: newY))
-            }
-        }
+        // Now compute the exact window origin from first principles.
+        // pw.frame.width / .height are the final chrome-inclusive dimensions.
+        let winW = pw.frame.width
+        let winH = pw.frame.height
+        let newX = buttonMidXScreen - winW / 2
+        let newY = popoverTopEdge - winH
+
+        mbkLog("PopoverController",
+               "reshowWithSize — setFrame x=\(newX) y=\(newY) w=\(winW) h=\(winH)")
+        pw.setFrameOrigin(NSPoint(x: newX, y: newY))
     }
 
     // MARK: - Helpers
@@ -251,6 +270,9 @@ extension MBKPopoverController: NSPopoverDelegate {
         setButtonHighlight(false)
         stopEventMonitor()
         overlayGate.hasActiveOverlay = false
+        // Reset anchors so next open recaptures fresh geometry.
+        buttonMidXScreen = 0
+        popoverTopEdge = 0
         mbkLog("PopoverController", "overlay gate reset on close")
     }
 }
