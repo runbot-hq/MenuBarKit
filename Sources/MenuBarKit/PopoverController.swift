@@ -7,15 +7,12 @@
 //
 // ARROW CENTERING:
 //   show(relativeTo:of:preferredEdge:) with a 1pt rect at button.bounds.midX
-//   is the ONLY reliable way to center the arrow. All manual setFrameOrigin
-//   approaches fail because the NSPopover chrome is asymmetric and AppKit
-//   re-flows the window position after contentSize changes.
+//   is the ONLY reliable way to center the arrow.
 //
 //   On resize (applyContentSize):
 //     1. Write contentSize.
-//     2. Dismiss with close() (no animation, no delegate side-effects).
-//     3. Re-show with show() using the same centerRect.
-//   popover.animates = false means no flicker.
+//     2. close() synchronously (animates=false, isReopening=true suppresses delegate).
+//     3. Defer show() one runloop turn so the button window geometry is valid.
 //
 // SIDE-JUMP UNDER AUTO-HIDE MENUBAR:
 //   buttonY > screenH (strictly) = hidden. buttonY == screenH = visible.
@@ -109,14 +106,13 @@ public final class MBKPopoverController: NSObject {
         startEventMonitor()
     }
 
-    /// Calls show() with a 1pt rect at button midX. This is the canonical
-    /// anchor call — AppKit centers the arrow over this rect reliably.
+    /// Calls show() with a 1pt rect at button midX.
     private func showPopoverAnchored(to button: NSStatusBarButton) {
         let midX = button.bounds.midX
         let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
                                 width: 1, height: button.bounds.height)
+        mbkLog("PopoverController", "showPopoverAnchored — midX=\(midX) buttonBounds=\(button.bounds) buttonFrame=\(button.frame)")
         popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
-        mbkLog("PopoverController", "showPopoverAnchored — midX=\(midX)")
     }
 
     private func setButtonHighlight(_ on: Bool) {
@@ -150,9 +146,6 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
-    /// Writes a new contentSize and re-anchors the arrow by closing and
-    /// reopening the popover. This is the only reliable way to make AppKit
-    /// re-center the arrow — manual window repositioning is unreliable.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -199,17 +192,20 @@ public final class MBKPopoverController: NSObject {
                + "forceReanchor=\(forceReanchor) "
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
 
-        // Write the new size.
         popover.contentSize = preferred
 
-        // Close without triggering popoverDidClose side-effects, then reshow.
-        // animates=false means this is invisible to the user.
+        // Close synchronously (animates=false = invisible), suppressing delegate side-effects.
         isReopening = true
         popover.close()
         isReopening = false
-        showPopoverAnchored(to: button)
 
-        mbkLog("PopoverController", "applyContentSize — done")
+        // Defer show() one runloop so the status bar button window has
+        // re-established its geometry before we anchor against it.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.showPopoverAnchored(to: button)
+            mbkLog("PopoverController", "applyContentSize — reopened")
+        }
     }
 
     // MARK: - Workspace observer
@@ -277,7 +273,6 @@ extension MBKPopoverController: NSPopoverDelegate {
     }
 
     public func popoverShouldClose(_ popover: NSPopover) -> Bool {
-        // During a reopen cycle, always allow the close.
         if isReopening { return true }
         let block = overlayGate.hasActiveOverlay
         mbkLog("PopoverController", "popoverShouldClose blocked=\(block)")
@@ -285,7 +280,6 @@ extension MBKPopoverController: NSPopoverDelegate {
     }
 
     public func popoverDidClose(_ notification: Notification) {
-        // Skip side-effects during a programmatic close+reopen cycle.
         guard !isReopening else {
             mbkLog("PopoverController", "popoverDidClose — reopen in progress, skipping side-effects")
             return
