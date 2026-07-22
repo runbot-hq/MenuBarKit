@@ -7,16 +7,15 @@
 //   topEdge          — pw.frame.maxY  (constant: just below menu bar)
 //   buttonMidXScreen — button centre in screen coords (constant per open)
 //   chromeDelta      — pw.frame.size − contentSize (arrow+border, constant)
-//   positioningRect  — 1pt-wide rect centred on button (reused for show())
-//   positioningView  — the status button view (reused for show())
 //
-// On every subsequent resize:
-//   1. Compute new window rect from contentSize + chromeDelta (no AppKit reads).
-//   2. Set contentSize.
-//   3. Call show() to force AppKit to repaint the arrow centred on the anchor.
-//   4. Call setFrame with our pre-computed rect to snap the window position.
-//      (show() places the window; we immediately overwrite the frame before
-//       the run loop redraws, so there is no visible jump.)
+// On every subsequent resize (no show() — eliminates flicker):
+//   1. Compute target frame from contentSize + chromeDelta.
+//   2. pw.orderOut(nil)        — hide before any geometry changes
+//   3. popover.contentSize = … — resize content (repaints arrow chrome)
+//   4. pw.setFrame(…)         — position while offscreen
+//   5. pw.orderFront(nil)      — reappear at exact final position
+//
+// No intermediate positions are ever visible on screen.
 
 import AppKit
 import Combine
@@ -38,8 +37,6 @@ public final class MBKPopoverController: NSObject {
     private var buttonMidXScreen: CGFloat = 0
     private var popoverTopEdge: CGFloat = 0
     private var chromeDelta: NSSize = .zero
-    private weak var positioningView: NSView?
-    private var positioningRect: NSRect = .zero
 
     // MARK: - Owned objects
 
@@ -121,8 +118,6 @@ public final class MBKPopoverController: NSObject {
             let cs = popover.contentSize
             chromeDelta = NSSize(width:  pw.frame.width  - cs.width,
                                  height: pw.frame.height - cs.height)
-            positioningView = button
-            positioningRect = rect
             mbkLog("PopoverController",
                    "anchor — topEdge=\(popoverTopEdge) buttonMidX=\(buttonMidXScreen) " +
                    "chrome=(\(chromeDelta.width),\(chromeDelta.height)) pwFrame=\(pw.frame)")
@@ -159,7 +154,6 @@ public final class MBKPopoverController: NSObject {
         guard let button = statusItem.button,
               let buttonWin = button.window else { return }
         guard popoverTopEdge > 0, buttonMidXScreen > 0, chromeDelta != .zero else { return }
-        guard let pv = positioningView else { return }
 
         let buttonY = buttonWin.frame.origin.y
         let screenH = buttonWin.screen?.frame.height ?? -1
@@ -171,7 +165,9 @@ public final class MBKPopoverController: NSObject {
         let current = popover.contentSize
         guard abs(current.width - size.width) > 1 || abs(current.height - size.height) > 1 else { return }
 
-        // 1. Compute exact target frame before touching anything.
+        guard let pw = popover.contentViewController?.view.window else { return }
+
+        // Compute exact target frame before any writes.
         let winW = size.width  + chromeDelta.width
         let winH = size.height + chromeDelta.height
         let newX = buttonMidXScreen - winW / 2
@@ -182,19 +178,13 @@ public final class MBKPopoverController: NSObject {
                "reshowWithSize — content=(\(size.width),\(size.height)) " +
                "target=(\(newX),\(newY),\(winW),\(winH))")
 
-        // 2. Write new contentSize.
+        // Hide → resize → reposition → show. No intermediate state is visible.
+        pw.orderOut(nil)
         popover.contentSize = size
+        pw.setFrame(targetFrame, display: false)
+        pw.orderFront(nil)
 
-        // 3. show() forces AppKit to repaint the arrow centred on the anchor.
-        //    animates=false means no visible transition.
-        popover.show(relativeTo: positioningRect, of: pv, preferredEdge: .minY)
-
-        // 4. Snap the window to our pre-computed exact frame.
-        //    This overwrites whatever position show() chose, before the run loop redraws.
-        if let pw = popover.contentViewController?.view.window {
-            pw.setFrame(targetFrame, display: false)
-            mbkLog("PopoverController", "reshowWithSize — pw.frame after=\(pw.frame)")
-        }
+        mbkLog("PopoverController", "reshowWithSize — pw.frame after=\(pw.frame)")
     }
 
     // MARK: - Helpers
@@ -286,8 +276,6 @@ extension MBKPopoverController: NSPopoverDelegate {
         buttonMidXScreen = 0
         popoverTopEdge   = 0
         chromeDelta      = .zero
-        positioningView  = nil
-        positioningRect  = .zero
         mbkLog("PopoverController", "overlay gate reset on close")
     }
 }
