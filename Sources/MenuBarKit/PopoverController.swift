@@ -123,9 +123,10 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
-    /// Re-anchors the popover at the new content size by closing and
-    /// immediately reshowing it (with animation disabled), rather than
-    /// mutating contentSize/frame on the already-shown window.
+    /// Re-anchors the popover at the new content size by closing FIRST,
+    /// writing contentSize while hidden, then reshowing (animation
+    /// disabled), rather than mutating contentSize/frame on the
+    /// already-shown window.
     ///
     /// WHY NEITHER IN-PLACE APPROACH WORKS:
     ///   - Manually calling setFrameOrigin() after writing contentSize moves
@@ -141,15 +142,20 @@ public final class MBKPopoverController: NSObject {
     ///     an async re-layout that visibly SNAPS the window to its new
     ///     position (a well-known AppKit quirk) — trading arrow drift for an
     ///     equally visible side-jump.
+    ///   - Writing contentSize on the STILL-SHOWN popover before close+
+    ///     reshow makes AppKit run its own in-place resize/relayout on the
+    ///     live window immediately, which is itself a visible side-jump
+    ///     that happens before we ever get to close+reshow.
     ///
-    /// WHY CLOSE + RESHOW WORKS:
-    ///   show(relativeTo:of:preferredEdge:) always performs a full, fresh
-    ///   AppKit layout pass — window frame and arrow tip are computed
-    ///   together from positioningRect and contentSize, exactly as on first
-    ///   open. Since popover.animates = false, close+reshow is visually
+    /// WHY CLOSE-THEN-RESIZE-THEN-RESHOW WORKS:
+    ///   Closing first means the contentSize write applies to a hidden
+    ///   window (no visible relayout), and the subsequent
+    ///   show(relativeTo:of:preferredEdge:) performs a single, fresh AppKit
+    ///   layout pass where window frame and arrow tip are computed together
+    ///   from positioningRect and contentSize, exactly as on first open.
+    ///   Since popover.animates = false, close+reshow is visually
     ///   instantaneous (no flicker), and this guarantees the window and
-    ///   arrow are always consistent, regardless of how the width changes
-    ///   between views.
+    ///   arrow are always consistent with no in-between visible jump.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -179,18 +185,24 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        mbkLog("PopoverController",
-               "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
-               + "prev=(\(currentSize.width),\(currentSize.height))")
-        popover.contentSize = preferred
-
-        // Close and immediately reshow so AppKit redoes the full frame +
-        // arrow layout pass together at the new size. animates = false
-        // makes this imperceptible to the user. Suppress the delegate's
-        // side effects (highlight/eventMonitor/overlayGate reset) around
-        // this internal close+reshow since it isn't a user-driven dismiss.
+        // Close FIRST, then write contentSize, then reshow. Writing
+        // contentSize while the popover is still visible makes AppKit run
+        // its own in-place resize/relayout on the live window immediately
+        // — that in-place resize is itself a visible side-jump, occurring
+        // before we ever get to close+reshow. Closing first means the
+        // contentSize write applies to a hidden window, so nothing jumps;
+        // the subsequent show() then does a single, fresh, correctly
+        // anchored layout pass at the new size. Suppress the delegate's
+        // side effects (highlight/eventMonitor/overlayGate reset) since
+        // this isn't a user-driven dismiss.
         isReanchoring = true
         popover.performClose(nil)
+
+        mbkLog("PopoverController",
+               "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
+               + "prev=(\(currentSize.width),\(currentSize.height)) while closed")
+        popover.contentSize = preferred
+
         let midX = button.bounds.midX
         let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
                                 width: 1, height: button.bounds.height)
