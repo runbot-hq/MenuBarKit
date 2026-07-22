@@ -1,10 +1,33 @@
 // PopoverController.swift
 // MenuBarKit
+//
+// Owns the full NSPopover + NSStatusItem lifecycle for a macOS menu-bar app.
+// Zero knowledge of the host app's views or state — all app-specific behaviour
+// is injected via closures at configuration time.
+//
+// ARROW CENTERING:
+//   show() pre-sizes contentSize to fittingSize so AppKit places the window
+//   at the correct width immediately. A 1pt positioningRect at button midX
+//   is used so AppKit anchors the arrow to the button center.
+//
+//   On resize (applyContentSize), AppKit may pre-resize the window BEFORE
+//   our contentSize write fires, shifting x incorrectly. We correct x both
+//   BEFORE and AFTER the write using:
+//
+//     buttonMidXOnScreen = buttonWin.frame.minX + button.frame.midX
+//     idealX             = buttonMidXOnScreen - popoverWindow.frame.width / 2
+//     clampedX           = clamped to screen.visibleFrame
+//
+//   popover.animates = false — prevents animation from showing the wrong
+//   pre-correction position.
+//
+// SIDE-JUMP UNDER AUTO-HIDE MENUBAR:
+//   isMenuBarHidden = screenH < 0 || buttonY >= screenH
+//   Skips applyContentSize entirely when true.
 
 import AppKit
 import SwiftUI
 
-/// Manages the full NSPopover and NSStatusItem lifecycle for a macOS menu-bar app.
 @MainActor
 public final class MBKPopoverController: NSObject {
 
@@ -74,40 +97,19 @@ public final class MBKPopoverController: NSObject {
     private func openPopover() {
         guard let button = statusItem.button else { return }
 
-        let btnBounds   = button.bounds
-        let btnFrame    = button.frame
-        let btnWinFrame = button.window?.frame ?? .zero
-        let fitting     = hostingController.view.fittingSize
-        mbkLog("PopoverController",
-               "COORDS openPopover — "
-               + "button.bounds=\(btnBounds) "
-               + "button.frame=\(btnFrame) "
-               + "button.window.frame=\(btnWinFrame) "
-               + "fittingSize=(\(fitting.width),\(fitting.height)) "
-               + "popover.contentSize=(\(popover.contentSize.width),\(popover.contentSize.height))")
-
+        // Pre-size to fittingSize before show() so AppKit places window at
+        // correct width from the start.
+        let fitting = hostingController.view.fittingSize
         if fitting.width > 0, fitting.height > 0 {
             popover.contentSize = fitting
-            mbkLog("PopoverController", "COORDS openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
+            mbkLog("PopoverController", "openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
         }
 
         let midX = button.bounds.midX
         let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
                                 width: 1, height: button.bounds.height)
-        mbkLog("PopoverController", "COORDS openPopover — centerRect=\(centerRect)")
         popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
-
-        if let pw = popover.contentViewController?.view.window {
-            let screenMidXViaFrame  = btnWinFrame.minX + btnFrame.midX
-            let screenMidXViaBounds = btnWinFrame.minX + btnBounds.midX
-            mbkLog("PopoverController",
-                   "COORDS openPopover — after show() "
-                   + "popoverWindow=\(pw.frame) popoverMidX=\(pw.frame.midX) "
-                   + "screenMidXViaFrame=\(screenMidXViaFrame) "
-                   + "screenMidXViaBounds=\(screenMidXViaBounds)")
-        }
-
         mbkLog("PopoverController", "popover shown")
         startEventMonitor()
     }
@@ -123,11 +125,13 @@ public final class MBKPopoverController: NSObject {
         popover = NSPopover()
         popover.contentViewController = hostingController
         popover.contentSize = contentSize
-        popover.animates = true
+        popover.animates = false
         popover.behavior = .applicationDefined
         popover.delegate = self
         setupSizeObserver()
     }
+
+    // MARK: - Size observer
 
     private func setupSizeObserver() {
         sizeObservation = hostingController.view.observe(
@@ -141,21 +145,26 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
+    /// Writes a new contentSize to the popover and ensures the window x is
+    /// correct both before and after the write.
+    ///
+    /// AppKit may pre-resize the popover window (e.g. auto-layout pass) before
+    /// this method fires, leaving x wrong. We correct x before the write so
+    /// there is no frame where the window is at the wrong position.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
         let currentSize = popover.contentSize
         guard let button = statusItem.button,
               let buttonWin = button.window else {
-            mbkLog("PopoverController", "applyContentSize — no button/window/screen, skipping")
+            mbkLog("PopoverController", "applyContentSize — no button/window, skipping")
             return
         }
-        let buttonY  = buttonWin.frame.origin.y
-        let screenH  = buttonWin.screen?.frame.height ?? -1
+        let buttonY = buttonWin.frame.origin.y
+        let screenH = buttonWin.screen?.frame.height ?? -1
         let isMenuBarHidden = screenH < 0 || buttonY >= screenH
         mbkLog("PopoverController",
-               "applyContentSize — "
-               + "preferred=(\(preferred.width),\(preferred.height)) "
+               "applyContentSize — preferred=(\(preferred.width),\(preferred.height)) "
                + "current=(\(currentSize.width),\(currentSize.height)) "
                + "buttonY=\(buttonY) screenH=\(screenH) isMenuBarHidden=\(isMenuBarHidden)")
         guard !isMenuBarHidden else { return }
@@ -165,15 +174,25 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        // Log BEFORE
-        if let pw = popover.contentViewController?.view.window {
+        guard let screen = buttonWin.screen,
+              let pw = popover.contentViewController?.view.window else {
+            popover.contentSize = preferred
+            mbkLog("PopoverController", "applyContentSize — written (no screen for reposition)")
+            return
+        }
+
+        let buttonMidX = buttonWin.frame.minX + button.frame.midX
+
+        // Correct x BEFORE write — AppKit may have pre-resized the window
+        // leaving it at the wrong x already.
+        let preWinW = pw.frame.width
+        let preIdealX = buttonMidX - preWinW / 2
+        let preClampedX = max(screen.visibleFrame.minX, min(preIdealX, screen.visibleFrame.maxX - preWinW))
+        if abs(pw.frame.origin.x - preClampedX) > 1 {
             mbkLog("PopoverController",
-                   "COORDS applyContentSize BEFORE write — "
-                   + "popoverWindow=\(pw.frame) popoverMidX=\(pw.frame.midX) "
-                   + "button.bounds=\(button.bounds) button.frame=\(button.frame) "
-                   + "buttonWin.frame=\(buttonWin.frame) "
-                   + "screenMidXViaFrame=\(buttonWin.frame.minX + button.frame.midX) "
-                   + "screenMidXViaBounds=\(buttonWin.frame.minX + button.bounds.midX)")
+                   "applyContentSize — pre-write reposition x \(pw.frame.origin.x) → \(preClampedX) "
+                   + "(buttonMidX=\(buttonMidX) winW=\(preWinW))")
+            pw.setFrameOrigin(NSPoint(x: preClampedX, y: pw.frame.origin.y))
         }
 
         mbkLog("PopoverController",
@@ -181,31 +200,17 @@ public final class MBKPopoverController: NSObject {
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
         popover.contentSize = preferred
 
-        // Log AFTER and reposition
-        if let pw = popover.contentViewController?.view.window,
-           let screen = buttonWin.screen {
-            let winW  = pw.frame.width
-            let sMidViaFrame  = buttonWin.frame.minX + button.frame.midX
-            let sMidViaBounds = buttonWin.frame.minX + button.bounds.midX
-            let idealViaFrame  = sMidViaFrame  - winW / 2
-            let idealViaBounds = sMidViaBounds - winW / 2
-            let clampViaFrame  = max(screen.visibleFrame.minX, min(idealViaFrame,  screen.visibleFrame.maxX - winW))
-            let clampViaBounds = max(screen.visibleFrame.minX, min(idealViaBounds, screen.visibleFrame.maxX - winW))
-            let curX = pw.frame.origin.x
+        // Correct x AFTER write — the contentSize write may shift x again.
+        let postWinW = pw.frame.width
+        let postIdealX = buttonMidX - postWinW / 2
+        let postClampedX = max(screen.visibleFrame.minX, min(postIdealX, screen.visibleFrame.maxX - postWinW))
+        if abs(pw.frame.origin.x - postClampedX) > 1 {
             mbkLog("PopoverController",
-                   "COORDS applyContentSize AFTER write — "
-                   + "popoverWindow=\(pw.frame) popoverMidX=\(pw.frame.midX) winW=\(winW) "
-                   + "sMidViaFrame=\(sMidViaFrame) idealViaFrame=\(idealViaFrame) clampViaFrame=\(clampViaFrame) driftViaFrame=\(curX - clampViaFrame) "
-                   + "sMidViaBounds=\(sMidViaBounds) idealViaBounds=\(idealViaBounds) clampViaBounds=\(clampViaBounds) driftViaBounds=\(curX - clampViaBounds)")
-
-            let clampedX = clampViaFrame
-            if abs(curX - clampedX) > 1 {
-                mbkLog("PopoverController", "COORDS applyContentSize — repositioning x \(curX) → \(clampedX)")
-                pw.setFrameOrigin(NSPoint(x: clampedX, y: pw.frame.origin.y))
-            } else {
-                mbkLog("PopoverController", "COORDS applyContentSize — x already correct (\(curX)), no reposition")
-            }
+                   "applyContentSize — post-write reposition x \(pw.frame.origin.x) → \(postClampedX) "
+                   + "(buttonMidX=\(buttonMidX) winW=\(postWinW))")
+            pw.setFrameOrigin(NSPoint(x: postClampedX, y: pw.frame.origin.y))
         }
+
         mbkLog("PopoverController", "applyContentSize — done")
     }
 
