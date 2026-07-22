@@ -1,5 +1,34 @@
 // PopoverController.swift
 // MenuBarKit
+//
+// Owns the full NSPopover + NSStatusItem lifecycle for a macOS menu-bar app.
+// Zero knowledge of the host app's views or state — all app-specific behaviour
+// is injected via closures at configuration time.
+//
+// ARROW CENTERING:
+//   show() pre-sizes contentSize to (fixedWidth, fittingSize.height) so AppKit
+//   places the window at the correct size immediately. A 1pt positioningRect
+//   at button midX is used so AppKit anchors the arrow to the button center.
+//
+//   contentSize.width is NEVER changed again after openPopover(). Only height
+//   is updated dynamically, in applyContentHeight(). This is intentional and
+//   load bearing: NSPopover's arrow is computed from the positioningRect /
+//   anchor at show()/contentSize-set time, not re-derived from wherever the
+//   window frame ends up afterward. Manually correcting the window's x-origin
+//   after a width change (the previous approach) fights AppKit's own anchor
+//   math instead of cooperating with it, and the two inevitably desync — this
+//   is what caused the arrow to drift off-center when navigating between
+//   views of different widths. Keeping width constant means AppKit's own
+//   positioningRect-based centering keeps the arrow correctly anchored on
+//   every resize, with zero manual window-frame correction needed.
+//
+//   ❌ NEVER reintroduce manual setFrameOrigin() correction in a resize path
+//      as a way to "fix" a width change. If a view genuinely needs a
+//      different width, re-issue show() with a fresh positioningRect instead
+//      of mutating contentSize.width in place.
+//
+//   popover.animates = false — prevents animation from showing the wrong
+//   pre-correction position.
 
 import AppKit
 import SwiftUI
@@ -13,6 +42,9 @@ public final class MBKPopoverController: NSObject {
     private let rootView: AnyView
     private let symbolName: String
     private let contentSize: NSSize
+    /// Width is pinned for the lifetime of the popover. Never read fittingSize.width
+    /// or any dynamically-computed width back into contentSize after openPopover().
+    private var fixedWidth: CGFloat
 
     // MARK: - Owned objects
 
@@ -36,6 +68,7 @@ public final class MBKPopoverController: NSObject {
         self.overlayGate = overlayGate
         self.symbolName = symbolName
         self.contentSize = contentSize
+        self.fixedWidth = contentSize.width
     }
 
     // MARK: - Setup
@@ -73,12 +106,15 @@ public final class MBKPopoverController: NSObject {
     private func openPopover() {
         guard let button = statusItem.button else { return }
 
-        // Pre-size to fittingSize so AppKit places the window at the correct
-        // width immediately on show().
-        let fitting = hostingController.view.fittingSize
-        if fitting.width > 0, fitting.height > 0 {
-            popover.contentSize = fitting
-            mbkLog("PopoverController", "openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
+        // Pre-size to (fixedWidth, fittingSize.height) before show() so AppKit
+        // places the window at the correct size immediately. Width is ALWAYS
+        // fixedWidth here — never fittingSize.width — so the arrow anchoring
+        // stays valid for the lifetime of the popover.
+        let fittingHeight = hostingController.view.fittingSize.height
+        if fittingHeight > 0 {
+            let size = NSSize(width: fixedWidth, height: fittingHeight)
+            popover.contentSize = size
+            mbkLog("PopoverController", "openPopover — pre-sized to (\(size.width),\(size.height))")
         }
 
         let midX = button.bounds.midX
@@ -115,63 +151,32 @@ public final class MBKPopoverController: NSObject {
         ) { [weak self] _, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let settled = self.hostingController.view.fittingSize
-                self.applyContentSize(settled)
+                let settledHeight = self.hostingController.view.fittingSize.height
+                self.applyContentHeight(settledHeight)
             }
         }
     }
 
-    /// Writes the new contentSize and corrects window x AFTER the write only.
-    ///
-    /// IMPORTANT: Do not reposition before the write. By the time our frame
-    /// observer fires, AppKit auto-layout has already committed the new window
-    /// width into pw.frame.width even though popover.contentSize is stale.
-    /// Reading pw.frame.width pre-write gives the new width, not the current
-    /// one — computing idealX from it moves the window to the wrong x for the
-    /// still-old chrome size, breaking centering. Post-write, pw.frame.width
-    /// is final and the correction is exact.
-    private func applyContentSize(_ preferred: NSSize) {
+    /// Writes a new contentSize to the popover using the pinned fixedWidth and
+    /// the newly-measured height. Width is intentionally never read from
+    /// fittingSize or passed in — see the ARROW CENTERING note at the top of
+    /// this file for why. Because width never changes, AppKit's own
+    /// positioningRect-based anchoring keeps the arrow correctly centered on
+    /// every call with no manual window-frame correction required.
+    private func applyContentHeight(_ preferredHeight: CGFloat) {
         guard popover.isShown else { return }
-        guard preferred.width > 0, preferred.height > 0 else { return }
+        guard preferredHeight > 0 else { return }
         let currentSize = popover.contentSize
-        guard let button = statusItem.button,
-              let buttonWin = button.window else {
-            mbkLog("PopoverController", "applyContentSize — no button/window, skipping")
-            return
-        }
-        let buttonY = buttonWin.frame.origin.y
-        let screenH = buttonWin.screen?.frame.height ?? -1
-        guard screenH >= 0 && buttonY < screenH else {
-            mbkLog("PopoverController", "applyContentSize — menu bar hidden, skipping")
-            return
-        }
-        guard abs(currentSize.width - preferred.width) > 1
-                || abs(currentSize.height - preferred.height) > 1 else { return }
-
-        guard let screen = buttonWin.screen,
-              let pw = popover.contentViewController?.view.window else {
-            popover.contentSize = preferred
+        guard abs(currentSize.height - preferredHeight) > 1 else {
+            mbkLog("PopoverController", "applyContentHeight — no-op: height unchanged")
             return
         }
 
-        let buttonMidX = buttonWin.frame.minX + button.frame.midX
-
+        let size = NSSize(width: fixedWidth, height: preferredHeight)
         mbkLog("PopoverController",
-               "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
+               "applyContentHeight — writing (\(size.width),\(size.height)) "
                + "prev=(\(currentSize.width),\(currentSize.height))")
-        popover.contentSize = preferred
-
-        // Correct x after write — pw.frame.width is now the final chrome width.
-        let winW = pw.frame.width
-        let idealX = buttonMidX - winW / 2
-        let clampedX = max(screen.visibleFrame.minX, min(idealX, screen.visibleFrame.maxX - winW))
-        let curX = pw.frame.origin.x
-        if abs(curX - clampedX) > 1 {
-            mbkLog("PopoverController",
-                   "applyContentSize — reposition x \(curX) → \(clampedX) "
-                   + "(buttonMidX=\(buttonMidX) winW=\(winW))")
-            pw.setFrameOrigin(NSPoint(x: clampedX, y: pw.frame.origin.y))
-        }
+        popover.contentSize = size
     }
 
     // MARK: - Workspace observer
