@@ -13,41 +13,36 @@
 //   - Implement popoverShouldClose via the MBKOverlayGate
 //   - Reset the overlay gate in popoverDidClose (safety net)
 //
-// ARROW CENTERING — show() under alphaValue=0 on resize:
-//   On first open, show() places the arrow correctly from the start.
+// ARROW CENTERING — nuclear close+reopen on resize:
+//   On first open, show() creates the NSPopoverFrame at the correct size
+//   and position from scratch. Arrow is correct by construction.
 //
 //   On resize (applyContentSize):
-//     1. Write contentSize.
-//     2. Set pw.alphaValue = 0  (hide the window for the reposition).
-//     3. Call show() — re-anchors the arrow from scratch using the new
-//        contentSize and the positioningRect. With animates=false this is
-//        synchronous; the window is fully repositioned before we return.
-//     4. Restore pw.alphaValue = 1.
+//     1. Set isResizing = true.
+//     2. popover.close() — destroys the NSPopoverFrame window entirely.
+//        Bypasses popoverShouldClose (close() never calls it).
+//        popoverDidClose fires but isResizing gates out all teardown.
+//     3. Set popover.contentSize = preferred.
+//     4. popover.show() — creates a FRESH NSPopoverFrame at exactly the
+//        correct size and anchor. No intermediate wrong-position window
+//        ever exists. No jump. Arrow correct by construction.
+//     5. Set isResizing = false.
 //
-//   The arrow tip is baked in at show() time relative to the positioningRect.
-//   setFrameOrigin moves the chrome window but cannot move the arrow —
-//   arrow and window decouple after any setFrameOrigin call.
+//   ❌ Do NOT use show() on an already-shown popover to re-anchor.
+//   AppKit moves the existing NSPopoverFrame window via the window server.
+//   The position change is submitted to the compositor asynchronously —
+//   alphaValue tricks cannot hide it because the CA transaction and the
+//   window server move are on separate threads from the alpha write.
 //
-//   alphaValue=0 suppresses the visible side-jump that show() would
-//   otherwise produce. With animates=false the re-anchor is instantaneous
-//   and the alpha restore happens in the same runloop cycle — no flicker.
+//   ❌ Do NOT use setFrameOrigin. Moves the chrome, not the arrow.
 //
-//   ❌ Do NOT use setFrameOrigin to correct arrow position. It moves the
-//   window frame but leaves the arrow tip at its original screen position.
+//   ❌ Do NOT call performClose() for the silent resize close.
+//   performClose() calls popoverShouldClose, which may return false when
+//   the overlay gate is active, blocking the resize entirely.
 //
-//   ❌ Do NOT call show() without first setting alphaValue=0. The window
-//   will visibly jump to the new position before snapping back.
-//
-//   ❌ Do NOT call show() before writing contentSize — AppKit sizes the
-//   window at show() time. Wrong contentSize = wrong placement.
-//
-//   ❌ Do NOT set animates=true. The alpha trick only works because show()
-//   is synchronous when animates=false.
-//
-//   ❌ Do NOT add an isMenuBarHidden guard. buttonWin.frame.origin.y drifts
-//   after large resizes and misfires even with the menu bar fully visible.
-//   The guard was only needed to suppress the side-jump from show() — the
-//   alphaValue=0 bracket already does that. No guard needed.
+//   ❌ Do NOT call popover.close() from outside applyContentSize without
+//   setting isResizing = true first. popoverDidClose will tear down the
+//   event monitor and reset the overlay gate.
 //
 // STAY-OPEN-WHILE-SHEET-ACTIVE — deliberate trade-off:
 //   When a sheet (or file picker) is live, MBKPopoverController keeps the
@@ -59,6 +54,7 @@
 //
 // OUTSIDE-CLICK MONITOR:
 //   Started when the popover opens, stopped when it closes.
+//   Unaffected by resize close+reopen (isResizing gates stopEventMonitor).
 //
 // WORKSPACE OBSERVER — why queue: nil + Task { @MainActor }:
 //   queue: nil delivers on the poster's thread; Task { @MainActor } is the
@@ -80,8 +76,8 @@
 // SIZE OBSERVATION — why observe view.frame and read fittingSize:
 //   preferredContentSize is only recomputed when sizingOptions includes
 //   .preferredContentSize. With sizingOptions empty (required to prevent
-//   the side-jump), preferredContentSize never changes.
-//   view.frame IS updated live by SwiftUI on every layout pass.
+//   AppKit from auto-resizing the window), preferredContentSize never
+//   changes. view.frame IS updated live by SwiftUI on every layout pass.
 //   We read fittingSize (not view.frame.size) — fittingSize is the
 //   fully-settled ideal size; view.frame fires on intermediate passes.
 
@@ -106,6 +102,10 @@ public final class MBKPopoverController: NSObject {
     private var hostingController: NSHostingController<AnyView>!
     private var sizeObservation: NSKeyValueObservation?
     private var isSetUp = false
+    /// True while applyContentSize is executing a silent close+reopen.
+    /// Gates popoverDidClose and popoverWillShow so teardown and
+    /// highlight changes are suppressed during the invisible resize.
+    private var isResizing = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
@@ -156,18 +156,16 @@ public final class MBKPopoverController: NSObject {
     }
 
     /// Returns the 1pt-wide positioningRect centred at button.bounds.midX.
-    /// Used both for the initial show() and for the re-anchor on resize.
     private func centerRect(for button: NSButton) -> NSRect {
         let midX = button.bounds.midX
         return NSRect(x: midX - 0.5, y: button.bounds.minY,
                       width: 1, height: button.bounds.height)
     }
 
-    /// Opens the popover, pre-sizing to fittingSize so AppKit places the
-    /// arrow correctly from the start.
+    /// Opens the popover, pre-sizing to fittingSize so the fresh NSPopoverFrame
+    /// is created at the correct dimensions and arrow position from the start.
     ///
-    /// ❌ Do NOT call show() before writing contentSize — AppKit sizes the
-    /// window at show() time using whatever contentSize is set.
+    /// ❌ Do NOT call show() before writing contentSize.
     private func openPopover() {
         guard let button = statusItem.button else { return }
         let fitting = hostingController.view.fittingSize
@@ -189,10 +187,10 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Popover setup
 
     /// sizingOptions is intentionally empty — .preferredContentSize causes
-    /// a side-jump. Manual KVO on view.frame drives contentSize instead.
+    /// AppKit to auto-resize the window, fighting our manual contentSize writes.
     ///
-    /// animates=false — required so show() in applyContentSize is
-    /// synchronous, making the alphaValue=0 guard effective.
+    /// animates=false — required so close() and show() in applyContentSize
+    /// are instantaneous. Any animation would make the blank frame visible.
     /// ❌ Do NOT set animates=true.
     private func setupPopover() {
         hostingController = NSHostingController(rootView: rootView)
@@ -219,16 +217,15 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
-    /// Resizes the popover and re-anchors the arrow via show().
+    /// Resizes the popover by closing it and reopening it at the new size.
     ///
-    /// The arrow tip is baked in at show() time. setFrameOrigin cannot
-    /// move it — it only moves the chrome window, leaving the arrow
-    /// misaligned. show() must be called again to re-anchor.
+    /// This is the only approach that guarantees zero visible jump and a
+    /// correctly placed arrow. Any technique that mutates an already-shown
+    /// popover window (setFrameOrigin, show() re-call, alphaValue tricks)
+    /// races the window server compositor and produces a visible artifact.
     ///
-    /// The visible side-jump that show() would produce is suppressed by
-    /// setting pw.alphaValue=0 before the call and restoring it after.
-    /// With animates=false, show() is synchronous — the window is fully
-    /// repositioned before alphaValue is restored in the same runloop cycle.
+    /// close() destroys the NSPopoverFrame. show() creates a new one at
+    /// exactly the right geometry. The window never exists at a wrong position.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -238,9 +235,8 @@ public final class MBKPopoverController: NSObject {
             mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
             return
         }
-        guard let button = statusItem.button,
-              let pw = popover.contentViewController?.view.window else {
-            mbkLog("PopoverController", "applyContentSize — no button/window, skipping")
+        guard let button = statusItem.button else {
+            mbkLog("PopoverController", "applyContentSize — no button, skipping")
             return
         }
 
@@ -248,13 +244,11 @@ public final class MBKPopoverController: NSObject {
                "applyContentSize — WRITING (\(preferred.width),\(preferred.height)) "
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
 
-        // Step 1: write contentSize so show() uses the correct size.
-        popover.contentSize = preferred
-
-        // Step 2: hide, re-anchor, restore — all synchronous (animates=false).
-        pw.alphaValue = 0
+        isResizing = true
+        popover.close()                        // destroys NSPopoverFrame; popoverDidClose fires but is gated
+        popover.contentSize = preferred        // set size before show() so the new frame is created correctly
         popover.show(relativeTo: centerRect(for: button), of: button, preferredEdge: .minY)
-        pw.alphaValue = 1
+        isResizing = false
 
         mbkLog("PopoverController", "applyContentSize — done")
     }
@@ -319,17 +313,29 @@ public final class MBKPopoverController: NSObject {
 // MARK: - NSPopoverDelegate
 
 extension MBKPopoverController: NSPopoverDelegate {
+
     public func popoverWillShow(_ notification: Notification) {
+        // Skip highlight change during silent resize — button stays highlighted throughout.
+        guard !isResizing else { return }
         setButtonHighlight(true)
     }
 
     public func popoverShouldClose(_ popover: NSPopover) -> Bool {
+        // close() never calls this; only performClose() does.
+        // This is only reached for real user-initiated dismissals.
         let block = overlayGate.hasActiveOverlay
         mbkLog("PopoverController", "popoverShouldClose blocked=\(block)")
         return !block
     }
 
     public func popoverDidClose(_ notification: Notification) {
+        // During a silent resize close, skip all teardown.
+        // The event monitor, overlay gate, and button highlight must
+        // remain intact — the popover is immediately reopened.
+        guard !isResizing else {
+            mbkLog("PopoverController", "popoverDidClose — resize in progress, skipping teardown")
+            return
+        }
         mbkLog("PopoverController", "popoverDidClose")
         setButtonHighlight(false)
         stopEventMonitor()
