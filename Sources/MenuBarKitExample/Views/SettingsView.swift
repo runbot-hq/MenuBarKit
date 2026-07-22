@@ -15,6 +15,11 @@
 //     .mbkAlert wraps .alert() and manages the overlay gate automatically,
 //     preventing the outside-click monitor and workspace observer from
 //     closing the popover while the alert is on screen.
+//
+// Uses the same idealWidth as MainView (320). All views in the popover's
+// navigation tree MUST agree on the same width — see PopoverController's
+// ARROW CENTERING note. A mismatched width causes the popover to side-jump
+// and the arrow to misalign when navigating between views.
 
 import MenuBarKit
 import SwiftUI
@@ -79,7 +84,7 @@ struct SettingsView: View {
             Button("← Back") { appState.route = .main }
         }
         .padding(16)
-        .frame(width: 320)
+        .frame(idealWidth: 320, maxWidth: .infinity, alignment: .top)
         .onAppear    { print("[SettingsView] onAppear") }
         .onDisappear { print("[SettingsView] onDisappear") }
     }
