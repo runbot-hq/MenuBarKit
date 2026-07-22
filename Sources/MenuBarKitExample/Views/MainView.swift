@@ -5,10 +5,10 @@ import SwiftUI
 
 /// Landing view shown on first popover open. Navigates to `SettingsView`.
 ///
-/// Uses the same `idealWidth` as `SettingsView` (320). All views in the popover's
-/// navigation tree MUST agree on the same width — see PopoverController's
-/// ARROW CENTERING note. A mismatched width here causes the popover to
-/// side-jump and the arrow to misalign when navigating between views.
+/// Intentionally uses a DIFFERENT width (260) than SettingsView (320) to
+/// exercise PopoverController's dynamic-width arrow centering fix (see
+/// positioningRect re-assignment, guarded against degenerate button bounds,
+/// in applyContentSize()).
 struct MainView: View {
     /// App state injected from the environment.
     @Environment(AppState.self) private var appState
@@ -20,7 +20,7 @@ struct MainView: View {
                 .buttonStyle(.borderedProminent)
         }
         .padding(16)
-        .frame(idealWidth: 320, maxWidth: .infinity, alignment: .top)
+        .frame(width: 260)
         .onAppear    { print("[MainView] onAppear") }
         .onDisappear { print("[MainView] onDisappear") }
     }
