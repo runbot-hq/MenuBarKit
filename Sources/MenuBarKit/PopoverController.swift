@@ -1,38 +1,37 @@
 // PopoverController.swift
 // MenuBarKit
 //
-// NUCLEAR REWRITE (v2) — SIZE IS NOW EXPLICIT DATA, NEVER INFERRED.
+// *** TEST BRANCH: test/intrinsic-content-size-kvo ***
+// This is an EXPERIMENT, not a replacement for the working implementation
+// on fix/popover-arrow-centering. If this doesn't pan out, this branch
+// gets deleted and nothing here ships.
 //
-// History of failed size-inference approaches, all abandoned in this file:
-//   1. NSPopover.contentSize + preferredContentSize (original implementation):
-//      close+reshow cycles caused a visible side-jump on resize.
-//   2. NSHostingView.fittingSize + frame KVO: broke completely when the
-//      hosted content contained a GeometryReader (used for diagnostic
-//      logging in RootView) — GeometryReader has no intrinsic size, so
-//      fittingSize just echoed back whatever frame it was already given.
-//   3. .mbkReportSize() using a PreferenceKey + GeometryReader background:
-//      same root problem in a different shape — once WE started fixing
-//      hostingView.frame ourselves (to fix approach #2's fallout),
-//      GeometryReader's background measured OUR imposed frame and echoed
-//      it back, so it could never detect a real content change. Also
-//      independently broken by SwiftUI firing the PreferenceKey's
-//      .zero defaultValue before real layout, poisoning cached state.
+// WHAT'S DIFFERENT FROM THE WORKING VERSION:
+//   The working version (fix/popover-arrow-centering) makes size 100%
+//   caller-declared via setContentSize(_:) + Route.contentSize. That
+//   works but requires hand-maintaining a size table that can drift out
+//   of sync with each view's actual .frame(width:).
 //
-//   Every one of these failed for the same underlying reason: asking
-//   AppKit or SwiftUI to MEASURE arbitrary hosted content and report back
-//   an "intrinsic" size is fundamentally unreliable once any GeometryReader,
-//   externally-imposed frame, or lazy layout pass is anywhere in the tree.
-//   There is no successful measurement-based fix — the contract is broken
-//   by design for those view types.
+//   This experiment tries NSHostingView.sizingOptions = [.intrinsicContentSize]
+//   plus KVO on hostingView.intrinsicContentSize, instead of a manual
+//   table. This is NOT the same mechanism as the fittingSize/GeometryReader
+//   attempts from earlier tonight:
+//     - fittingSize / GeometryReader both ask "given the frame you
+//       currently have, what size do you report" — circular once we set
+//       that frame ourselves.
+//     - .intrinsicContentSize with sizingOptions enabled makes
+//       NSHostingView run SwiftUI's real layout solver to compute the
+//       content's ideal size, independent of the view's current .frame.
+//       It's the same AppKit contract as any other view with an
+//       intrinsic content size (like NSTextField) — Apple added this
+//       specifically so NSHostingView could report a real size to
+//       Auto-Layout-driven or manually-driven AppKit containers.
 //
-// THE FIX: MBKPopoverController no longer tries to measure anything.
-//   Callers explicitly declare their own desired size via
-//   `setContentSize(_:)`. There is no fittingSize, no KVO, no
-//   PreferenceKey, no GeometryReader in this file's implementation at
-//   all. The example app calls `popoverController.setContentSize(...)`
-//   whenever its route changes, from an explicit lookup table
-//   (Route.contentSize) — see RootView.swift / AppState.swift. Size is
-//   100% caller-declared data, not inferred by watching layout.
+//   IF THIS IS ALSO CIRCULAR IN PRACTICE (i.e. intrinsicContentSize just
+//   echoes back frame.size once we start setting the frame ourselves),
+//   that will show up immediately in the logs below as a size that never
+//   changes on route switch. That's the acceptance test for this
+//   experiment — if it fails, revert to Route.contentSize.
 
 import AppKit
 import SwiftUI
@@ -55,6 +54,7 @@ public final class MBKPopoverController: NSObject {
     private var isSetUp = false
     private var isShown = false
     private var currentContentSize: NSSize
+    private var intrinsicSizeObservation: NSKeyValueObservation?
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
@@ -76,24 +76,12 @@ public final class MBKPopoverController: NSObject {
 
     // MARK: - Public API
 
-    /// Explicitly sets the popover's content size and resizes/repositions
-    /// the window immediately if it is currently shown. This is the ONLY
-    /// way content size changes — there is no measurement of the hosted
-    /// SwiftUI content anywhere in this class. Callers own the decision
-    /// of what size their content needs, because only the caller's view
-    /// code can know that reliably (see file header for why measurement
-    /// approaches were abandoned).
+    /// Manual override, retained for compatibility with existing callers
+    /// (e.g. AppDelegate's initial contentSize:). Once intrinsicContentSize
+    /// KVO fires for real, that becomes the source of truth for as long as
+    /// this experiment is active.
     public func setContentSize(_ size: NSSize) {
-        guard size.width > 0, size.height > 0 else { return }
-        guard abs(currentContentSize.width - size.width) > 0.5
-                || abs(currentContentSize.height - size.height) > 0.5 else { return }
-
-        currentContentSize = size
-        mbkLog("PopoverController", "setContentSize — (\(size.width),\(size.height))")
-
-        guard isShown, let (frame, arrowX) = computeFrame(for: size) else { return }
-        layout(frame: frame, arrowX: arrowX, contentSize: size)
-        mbkLog("PopoverController", "setContentSize — applied while shown, no close/reshow")
+        applySize(size, source: "setContentSize (manual)")
     }
 
     // MARK: - Setup
@@ -133,15 +121,15 @@ public final class MBKPopoverController: NSObject {
     private func setupWindow() {
         hostingView = NSHostingView(rootView: rootView)
 
+        // *** THE EXPERIMENT ***
+        // Ask NSHostingView to compute and report its intrinsicContentSize
+        // from SwiftUI's real layout solver, rather than deriving size from
+        // whatever frame we happen to have assigned it.
+        hostingView.sizingOptions = [.intrinsicContentSize]
+
         arrowView = MBKArrowView()
         arrowView.autoresizingMask = [.width, .height]
 
-        // Use NSPanel with .nonactivatingPanel styleMask, NOT plain
-        // .borderless NSWindow. AnchoredSheet.swift locates "the popover
-        // window" by searching NSApp.windows for
-        // styleMask.contains(.nonactivatingPanel) — that discriminator
-        // must keep matching this window or sheet-anchoring (mbkSheet)
-        // breaks silently for every consumer of this package.
         let win = NSPanel(
             contentRect: NSRect(origin: .zero, size: currentContentSize),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -164,14 +152,24 @@ public final class MBKPopoverController: NSObject {
         arrowView.addSubview(hostingView)
 
         window = win
+
+        // KVO on intrinsicContentSize — NOT on .frame. This is the
+        // distinguishing test: does intrinsicContentSize actually change
+        // independently of the frame we impose in applySize()?
+        intrinsicSizeObservation = hostingView.observe(\.intrinsicContentSize, options: [.new]) { [weak self] _, change in
+            guard let self, let newValue = change.newValue else { return }
+            mbkLog("PopoverController", "KVO intrinsicContentSize fired — (\(newValue.width),\(newValue.height))")
+            guard newValue.width > 0, newValue.height > 0,
+                  newValue.width.isFinite, newValue.height.isFinite else {
+                mbkLog("PopoverController", "KVO intrinsicContentSize — ignoring invalid/placeholder value")
+                return
+            }
+            self.applySize(newValue, source: "KVO intrinsicContentSize")
+        }
     }
 
     // MARK: - Frame computation
 
-    /// Computes the window frame + arrow x so that the arrow always points
-    /// at the status item button's horizontal center, for a given content
-    /// size. This is the ONLY place window geometry is calculated — one
-    /// function, one call site per open/resize, no AppKit black box.
     private func computeFrame(for contentSize: NSSize) -> (frame: NSRect, arrowX: CGFloat)? {
         guard let button = statusItem.button, let buttonWindow = button.window else { return nil }
         let buttonScreenFrame = buttonWindow.convertToScreen(button.frame)
@@ -193,14 +191,24 @@ public final class MBKPopoverController: NSObject {
         return (frame, arrowX)
     }
 
-    /// Applies a window frame + arrow position, and lays out arrowView /
-    /// hostingView to match `contentSize` exactly — the caller-declared
-    /// size, never a measured one.
     private func layout(frame: NSRect, arrowX: CGFloat, contentSize: NSSize) {
         arrowView.frame = NSRect(origin: .zero, size: frame.size)
         hostingView.frame = NSRect(x: 0, y: 0, width: contentSize.width, height: contentSize.height)
         arrowView.arrowXInWindow = arrowX
         window.setFrame(frame, display: true)
+    }
+
+    private func applySize(_ size: NSSize, source: String) {
+        guard size.width > 0, size.height > 0 else { return }
+        guard abs(currentContentSize.width - size.width) > 0.5
+                || abs(currentContentSize.height - size.height) > 0.5 else { return }
+
+        currentContentSize = size
+        mbkLog("PopoverController", "applySize [\(source)] — (\(size.width),\(size.height))")
+
+        guard isShown, let (frame, arrowX) = computeFrame(for: size) else { return }
+        layout(frame: frame, arrowX: arrowX, contentSize: size)
+        mbkLog("PopoverController", "applySize [\(source)] — applied while shown, no close/reshow")
     }
 
     // MARK: - Open / close
