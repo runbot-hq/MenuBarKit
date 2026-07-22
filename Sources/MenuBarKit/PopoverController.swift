@@ -21,6 +21,7 @@ public final class MBKPopoverController: NSObject {
     private var hostingController: NSHostingController<AnyView>!
     private var sizeObservation: NSKeyValueObservation?
     private var isSetUp = false
+    private var isReanchoring = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
@@ -74,7 +75,8 @@ public final class MBKPopoverController: NSObject {
         guard let button = statusItem.button else { return }
 
         // Pre-size to fittingSize so AppKit places the window at the correct
-        // width immediately on show().
+        // width and computes the arrow at the correct offset immediately on
+        // show().
         let fitting = hostingController.view.fittingSize
         if fitting.width > 0, fitting.height > 0 {
             popover.contentSize = fitting
@@ -121,26 +123,33 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
-    /// Writes the new contentSize and corrects window x AFTER the write only.
+    /// Re-anchors the popover at the new content size by closing and
+    /// immediately reshowing it (with animation disabled), rather than
+    /// mutating contentSize/frame on the already-shown window.
     ///
-    /// IMPORTANT: We correct via setFrameOrigin(), not by re-assigning
-    /// positioningRect. Re-assigning positioningRect on an already-shown
-    /// popover does force AppKit to recompute the arrow, but it does so via
-    /// an async re-layout that visibly SNAPS the window to its new position
-    /// (a well-known AppKit quirk) — trading the arrow-drift bug for a worse
-    /// side-jump bug. setFrameOrigin() repositions the window immediately
-    /// and synchronously, with no snap, and is sufficient here: the arrow is
-    /// drawn relative to the window's own geometry at the popover's current
-    /// width, so keeping the window horizontally centered on the button
-    /// keeps the arrow centered too.
+    /// WHY NEITHER IN-PLACE APPROACH WORKS:
+    ///   - Manually calling setFrameOrigin() after writing contentSize moves
+    ///     the *window*, but the arrow's internal offset (distance from the
+    ///     window's left edge to the arrow tip) is computed once, during the
+    ///     original show() layout pass, and is never recalculated afterward.
+    ///     The window ends up centered on the button, but the arrow tip
+    ///     stays at whatever offset AppKit computed for the FIRST width —
+    ///     producing visible drift whenever a later width differs from the
+    ///     first one shown.
+    ///   - Re-assigning positioningRect on an already-shown popover does
+    ///     force AppKit to recompute the arrow correctly, but it does so via
+    ///     an async re-layout that visibly SNAPS the window to its new
+    ///     position (a well-known AppKit quirk) — trading arrow drift for an
+    ///     equally visible side-jump.
     ///
-    /// By the time our frame observer fires, AppKit auto-layout has already
-    /// committed the new window width into pw.frame.width even though
-    /// popover.contentSize is stale. Reading pw.frame.width pre-write gives
-    /// the new width, not the current one — computing idealX from it moves
-    /// the window to the wrong x for the still-old chrome size, breaking
-    /// centering. Post-write, pw.frame.width is final and the correction is
-    /// exact.
+    /// WHY CLOSE + RESHOW WORKS:
+    ///   show(relativeTo:of:preferredEdge:) always performs a full, fresh
+    ///   AppKit layout pass — window frame and arrow tip are computed
+    ///   together from positioningRect and contentSize, exactly as on first
+    ///   open. Since popover.animates = false, close+reshow is visually
+    ///   instantaneous (no flicker), and this guarantees the window and
+    ///   arrow are always consistent, regardless of how the width changes
+    ///   between views.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -151,10 +160,7 @@ public final class MBKPopoverController: NSObject {
             return
         }
         // Skip only when the status item's button is genuinely off-screen
-        // (e.g. auto-hidden menu bar). A fragile buttonY-vs-screenHeight
-        // heuristic previously false-positived on ordinary, fully visible
-        // menu bars during live resizes, causing this whole function to be
-        // skipped and the window/arrow correction to be missed.
+        // (e.g. auto-hidden menu bar).
         if let screen = buttonWin.screen, !screen.frame.contains(buttonWin.frame.origin) {
             mbkLog("PopoverController", "applyContentSize — button off-screen, skipping")
             return
@@ -162,30 +168,35 @@ public final class MBKPopoverController: NSObject {
         guard abs(currentSize.width - preferred.width) > 1
                 || abs(currentSize.height - preferred.height) > 1 else { return }
 
-        guard let screen = buttonWin.screen,
-              let pw = popover.contentViewController?.view.window else {
+        // Don't close/reshow while an overlay (sheet/alert) is active —
+        // performClose() would tear down the overlay-gate state and any
+        // anchored child window relationships. In that case just resize in
+        // place; the arrow may be briefly off until the next resize after
+        // the overlay clears.
+        guard !overlayGate.hasActiveOverlay else {
+            mbkLog("PopoverController", "applyContentSize — overlay active, resizing in place only")
             popover.contentSize = preferred
             return
         }
-
-        let buttonMidX = buttonWin.frame.minX + button.frame.midX
 
         mbkLog("PopoverController",
                "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
                + "prev=(\(currentSize.width),\(currentSize.height))")
         popover.contentSize = preferred
 
-        // Correct x after write — pw.frame.width is now the final chrome width.
-        let winW = pw.frame.width
-        let idealX = buttonMidX - winW / 2
-        let clampedX = max(screen.visibleFrame.minX, min(idealX, screen.visibleFrame.maxX - winW))
-        let curX = pw.frame.origin.x
-        if abs(curX - clampedX) > 1 {
-            mbkLog("PopoverController",
-                   "applyContentSize — reposition x \(curX) → \(clampedX) "
-                   + "(buttonMidX=\(buttonMidX) winW=\(winW))")
-            pw.setFrameOrigin(NSPoint(x: clampedX, y: pw.frame.origin.y))
-        }
+        // Close and immediately reshow so AppKit redoes the full frame +
+        // arrow layout pass together at the new size. animates = false
+        // makes this imperceptible to the user. Suppress the delegate's
+        // side effects (highlight/eventMonitor/overlayGate reset) around
+        // this internal close+reshow since it isn't a user-driven dismiss.
+        isReanchoring = true
+        popover.performClose(nil)
+        let midX = button.bounds.midX
+        let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
+                                width: 1, height: button.bounds.height)
+        popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
+        isReanchoring = false
+        mbkLog("PopoverController", "applyContentSize — re-shown at new size, arrow re-centered")
     }
 
     // MARK: - Workspace observer
@@ -249,6 +260,7 @@ public final class MBKPopoverController: NSObject {
 
 extension MBKPopoverController: NSPopoverDelegate {
     public func popoverWillShow(_ notification: Notification) {
+        guard !isReanchoring else { return }
         setButtonHighlight(true)
     }
 
@@ -259,6 +271,10 @@ extension MBKPopoverController: NSPopoverDelegate {
     }
 
     public func popoverDidClose(_ notification: Notification) {
+        guard !isReanchoring else {
+            mbkLog("PopoverController", "popoverDidClose — internal re-anchor close, skipping teardown")
+            return
+        }
         mbkLog("PopoverController", "popoverDidClose")
         setButtonHighlight(false)
         stopEventMonitor()
