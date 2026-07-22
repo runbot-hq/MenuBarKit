@@ -16,10 +16,12 @@
 //     preventing the outside-click monitor and workspace observer from
 //     closing the popover while the alert is on screen.
 //
-// Uses the same idealWidth as MainView (320). All views in the popover's
-// navigation tree MUST agree on the same width — see PopoverController's
-// ARROW CENTERING note. A mismatched width causes the popover to side-jump
-// and the arrow to misalign when navigating between views.
+// Intentionally uses a fixed width (320) DIFFERENT from MainView's (260) to
+// exercise PopoverController's dynamic-width arrow centering fix. MUST be a
+// fixed .frame(width:) — NOT idealWidth + maxWidth: .infinity. The latter
+// makes the view stretch to fill whatever width the popover already has
+// instead of reporting its own intrinsic width via fittingSize, which is
+// what caused contentSize to stay frozen at the previous route's width.
 
 import MenuBarKit
 import SwiftUI
@@ -84,7 +86,7 @@ struct SettingsView: View {
             Button("← Back") { appState.route = .main }
         }
         .padding(16)
-        .frame(idealWidth: 320, maxWidth: .infinity, alignment: .top)
+        .frame(width: 320)
         .onAppear    { print("[SettingsView] onAppear") }
         .onDisappear { print("[SettingsView] onDisappear") }
     }
