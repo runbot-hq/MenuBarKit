@@ -190,10 +190,11 @@ public final class MBKPopoverController: NSObject {
         let resolvedScreen = buttonWin.screen ?? NSScreen.main
         let screenH = resolvedScreen?.frame.height ?? CGFloat.infinity
         let isMenuBarHidden = buttonY >= screenH
+        let screenSource = buttonWin.screen != nil ? "buttonWin" : "NSScreen.main"
         mbkLog("PopoverController",
                "applyContentSize — preferred=(\(preferred.width),\(preferred.height)) "
                + "buttonY=\(buttonY) screenH=\(screenH) isMenuBarHidden=\(isMenuBarHidden) "
-               + "screenSource=\(buttonWin.screen != nil ? \"buttonWin\" : \"NSScreen.main\")")
+               + "screenSource=\(screenSource)")
         guard !isMenuBarHidden else {
             mbkLog("PopoverController", "applyContentSize — SKIP: menubar hidden (buttonY=\(buttonY) >= screenH=\(screenH))")
             return
