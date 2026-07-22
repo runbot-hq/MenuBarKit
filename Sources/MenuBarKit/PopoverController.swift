@@ -25,8 +25,14 @@
 //   pre-correction position.
 //
 // SIDE-JUMP UNDER AUTO-HIDE MENUBAR:
-//   isMenuBarHidden = screenH < 0 || buttonY >= screenH
-//   Skips applyContentSize entirely when true.
+//   Signal: buttonY >= screenH (Dock pushes NSStatusItem window off top edge).
+//   Observed values: buttonY=982 screenH=982 when hidden.
+//
+//   buttonWin.screen can transiently return nil while the menubar is hiding.
+//   We fall back to NSScreen.main rather than treating nil as "hidden".
+//   Only skip the contentSize write when we have a real screenH and
+//   buttonY >= screenH. If there is genuinely no screen, use
+//   CGFloat.infinity so the write always goes through.
 
 import AppKit
 import SwiftUI
@@ -161,9 +167,11 @@ public final class MBKPopoverController: NSObject {
     /// runloop cycle (with `animates = false`) so there is no intermediate
     /// frame with a wrong x origin.
     ///
-    /// Skips the write entirely when the auto-hide menubar is hidden
-    /// (buttonY >= screenH) — any contentSize write in that state causes
-    /// AppKit anchor geometry to collapse the popover x-origin to 0.
+    /// Skips the write when the auto-hide menubar is hidden:
+    ///   buttonY >= screenH  (Dock pushes NSStatusItem window off top edge)
+    /// Falls back to NSScreen.main when buttonWin.screen is transiently nil.
+    /// Uses CGFloat.infinity if no screen is available at all, so the write
+    /// goes through rather than being skipped on a transient nil.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -173,17 +181,21 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        // Auto-hide menubar guard: buttonY >= screenH means the Dock has pushed
-        // the NSStatusItem window off the top edge. Any contentSize write in
-        // this state collapses the popover x-origin to 0 (side-jump).
+        // Auto-hide menubar guard.
+        // buttonWin.screen can be transiently nil while the menubar is hiding/
+        // showing. Fall back to NSScreen.main rather than treating nil as hidden.
+        // Only skip when we have a real screen and buttonY >= screenH.
+        // If there is genuinely no screen, use .infinity so the write goes through.
         let buttonY = buttonWin.frame.origin.y
-        let screenH = buttonWin.screen?.frame.height ?? -1
-        let isMenuBarHidden = screenH < 0 || buttonY >= screenH
+        let resolvedScreen = buttonWin.screen ?? NSScreen.main
+        let screenH = resolvedScreen?.frame.height ?? CGFloat.infinity
+        let isMenuBarHidden = buttonY >= screenH
         mbkLog("PopoverController",
                "applyContentSize — preferred=(\(preferred.width),\(preferred.height)) "
-               + "buttonY=\(buttonY) screenH=\(screenH) isMenuBarHidden=\(isMenuBarHidden)")
+               + "buttonY=\(buttonY) screenH=\(screenH) isMenuBarHidden=\(isMenuBarHidden) "
+               + "screenSource=\(buttonWin.screen != nil ? \"buttonWin\" : \"NSScreen.main\")")
         guard !isMenuBarHidden else {
-            mbkLog("PopoverController", "applyContentSize — SKIP: menubar hidden")
+            mbkLog("PopoverController", "applyContentSize — SKIP: menubar hidden (buttonY=\(buttonY) >= screenH=\(screenH))")
             return
         }
 
@@ -194,7 +206,7 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        guard let screen = buttonWin.screen,
+        guard let screen = resolvedScreen,
               let pw = popover.contentViewController?.view.window else {
             popover.contentSize = preferred
             mbkLog("PopoverController", "applyContentSize — written (no screen for reposition)")
