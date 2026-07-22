@@ -11,11 +11,12 @@
 // On every subsequent resize:
 //   1. Compute target frame from contentSize + chromeDelta (no AppKit reads).
 //   2. popover.contentSize = size
-//   3. Inside NSAnimationContext(duration:0, allowsImplicitAnimation:false):
-//      pw.setFrame(targetFrame, display: true)
+//   3. NSAnimationContext(duration:0) { pw.setFrame(targetFrame, display:true) }
 //
-// The animation context suppresses AppKit's implicit window-move animation
-// so the window jumps instantly to the new position with no slide-in.
+// Route-change flash fix
+// ──────────────────────
+// relay.routeChangeSignal → pw.alphaValue = 0  (hide before wrong-size frame)
+// next reshowWithSize()   → pw.alphaValue = 1  (show at correct size)
 
 import AppKit
 import Combine
@@ -38,12 +39,17 @@ public final class MBKPopoverController: NSObject {
     private var popoverTopEdge: CGFloat = 0
     private var chromeDelta: NSSize = .zero
 
+    // MARK: - Route-change flash suppression
+
+    private var windowFrozen = false
+
     // MARK: - Owned objects
 
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var hostingController: NSHostingController<AnyView>!
     private var resizeSubscription: AnyCancellable?
+    private var routeChangeSubscription: AnyCancellable?
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
@@ -141,6 +147,17 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Size relay
 
     private func setupSizeRelay() {
+        // Hide window immediately on route-change signal.
+        routeChangeSubscription = sizeRelay.routeChangeSignal
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in
+                guard let self, self.popover.isShown else { return }
+                guard let pw = self.popover.contentViewController?.view.window else { return }
+                pw.alphaValue = 0
+                self.windowFrozen = true
+                mbkLog("PopoverController", "route change — window hidden")
+            }
+
         resizeSubscription = sizeRelay.subject
             .debounce(for: .milliseconds(16), scheduler: RunLoop.main)
             .sink { [weak self] newSize in
@@ -163,7 +180,8 @@ public final class MBKPopoverController: NSObject {
         }
 
         let current = popover.contentSize
-        guard abs(current.width - size.width) > 1 || abs(current.height - size.height) > 1 else { return }
+        // If frozen (mid-route-change), always apply even if size appears same.
+        guard windowFrozen || abs(current.width - size.width) > 1 || abs(current.height - size.height) > 1 else { return }
 
         guard let pw = popover.contentViewController?.view.window else { return }
 
@@ -176,15 +194,20 @@ public final class MBKPopoverController: NSObject {
 
         mbkLog("PopoverController",
                "reshowWithSize — content=(\(size.width),\(size.height)) " +
-               "target=(\(newX),\(newY),\(winW),\(winH))")
+               "target=(\(newX),\(newY),\(winW),\(winH)) frozen=\(windowFrozen)")
 
         popover.contentSize = size
-
-        // Suppress AppKit's implicit window-move animation.
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0
             ctx.allowsImplicitAnimation = false
             pw.setFrame(targetFrame, display: true)
+        }
+
+        // Restore visibility after correct frame is committed.
+        if windowFrozen {
+            pw.alphaValue = 1
+            windowFrozen = false
+            mbkLog("PopoverController", "route change — window restored")
         }
 
         mbkLog("PopoverController", "reshowWithSize — pw.frame after=\(pw.frame)")
@@ -279,6 +302,7 @@ extension MBKPopoverController: NSPopoverDelegate {
         buttonMidXScreen = 0
         popoverTopEdge   = 0
         chromeDelta      = .zero
+        windowFrozen     = false
         mbkLog("PopoverController", "overlay gate reset on close")
     }
 }

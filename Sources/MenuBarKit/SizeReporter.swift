@@ -2,16 +2,18 @@
 // MenuBarKit
 //
 // Usage:
-//   1. Create MBKSizeRelay and inject it into the SwiftUI environment
-//   2. Apply .mbkReportSize() to your root view
-//   3. Pass the relay into MBKPopoverController(sizeRelay:)
+//   1. Create MBKSizeRelay and inject it into the SwiftUI environment.
+//   2. Apply .mbkReportSize() to your root view.
+//   3. Pass the relay into MBKPopoverController(sizeRelay:).
 //
-// Example (AppDelegate):
-//   let relay = MBKSizeRelay()
-//   let controller = MBKPopoverController(
-//       rootView: RootView().environment(relay),
-//       sizeRelay: relay, ...
-//   )
+// Route-change flash fix
+// ──────────────────────
+// When the SwiftUI route changes the GeometryReader fires once at the
+// old (wrong) size before firing at the new correct size. This causes a
+// visible flash. Fix: call relay.freezeForRouteChange() just before
+// mutating the route. PopoverController hides the window (alphaValue=0)
+// until the next reshowWithSize() call, when it snaps to the correct
+// frame and restores alphaValue=1.
 
 import Combine
 import Observation
@@ -24,7 +26,17 @@ import SwiftUI
 @Observable
 public final class MBKSizeRelay {
     public let subject = PassthroughSubject<NSSize, Never>()
+    /// Fired when a route change is about to happen. PopoverController
+    /// hides the window on this signal and restores it after the next resize.
+    public let routeChangeSignal = PassthroughSubject<Void, Never>()
+
     public init() {}
+
+    /// Call this immediately before mutating the route/navigation state.
+    /// PopoverController will hide the window until the new size is committed.
+    public func freezeForRouteChange() {
+        routeChangeSignal.send()
+    }
 }
 
 // MARK: - PreferenceKey
