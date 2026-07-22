@@ -23,5 +23,18 @@ struct RootView: View {
             }
         }
         .id(appState.route)
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear {
+                        print("[RootView] GeometryReader onAppear size=(\(geo.size.width),\(geo.size.height)) route=\(appState.route)")
+                    }
+                    .onChange(of: geo.size) { old, new in
+                        print("[RootView] size changed (\(old.width),\(old.height)) → (\(new.width),\(new.height)) route=\(appState.route)")
+                    }
+            }
+        )
+        .onAppear  { print("[RootView] onAppear  route=\(appState.route)") }
+        .onDisappear { print("[RootView] onDisappear route=\(appState.route)") }
     }
 }

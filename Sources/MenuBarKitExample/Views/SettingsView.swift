@@ -80,5 +80,7 @@ struct SettingsView: View {
         }
         .padding(16)
         .frame(minWidth: 260)
+        .onAppear   { print("[SettingsView] onAppear") }
+        .onDisappear { print("[SettingsView] onDisappear") }
     }
 }
