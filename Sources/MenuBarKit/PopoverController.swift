@@ -141,9 +141,9 @@
 //     screenH < 0 || buttonY >= screenH
 //
 //   screenH < 0 means button.window.screen returned nil — which itself signals
-//   the button window has been slid off-screen by the Dock. buttonY >= screenH
-//   is the normal case where screen is still associated but the origin is at or
-//   beyond the screen height.
+//   the button window has been slid off-screen by the Dock (screen association dropped).
+//   buttonY >= screenH is the normal case where screen is still associated but
+//   the window origin is at or beyond the screen height.
 //
 //   WRONG signals (do not use):
 //     button.window.screen == nil alone  ← misses the buttonY >= screenH case
@@ -161,9 +161,61 @@
 //   size is already correct (SwiftUI laid out fine). The next KVO fire after
 //   the menubar re-appears has a valid button position and writes normally.
 //   See runbot-hq/run-bot#2239.
+//
+// DEBUG/#2245 — setFrame interception probe:
+//   MBKDebugPopoverWindow is a temporary NSWindow subclass injected as the
+//   popover's content window after show(). Its sole purpose is to log every
+//   setFrame / setFrameOrigin call with a stack trace so we can determine
+//   whether AppKit's internal _repositionWindowRelativeToAnchor goes through
+//   the public setFrame override point.
+//
+//   HOW TO READ THE OUTPUT:
+//   - If "MBKDebugPopoverWindow › setFrame" lines appear during a side-jump,
+//     the override point is reachable → we can subclass to block the jump.
+//   - If NO setFrame lines appear but the window frame changes (x=0),
+//     AppKit writes directly to the backing store, bypassing the public API.
+//     In that case subclassing cannot help and we need a different strategy.
+//
+//   ❌ REMOVE MBKDebugPopoverWindow and injectDebugWindow() before shipping.
+//   This is diagnostic scaffolding only — not a fix.
 
 import AppKit
 import SwiftUI
+
+// MARK: - DEBUG PROBE (remove before shipping) --------------------------------
+
+/// Temporary NSWindow subclass injected into the NSPopover backing window slot
+/// to intercept all public frame-mutation calls during a side-jump.
+/// Purpose: determine whether _repositionWindowRelativeToAnchor goes through
+/// the public setFrame override point or bypasses it.
+/// ❌ DELETE this class and injectDebugWindow() before merging to release.
+final class MBKDebugPopoverWindow: NSWindow {
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        let caller = Thread.callStackSymbols.prefix(6).joined(separator: " | ")
+        mbkLog("MBKDebugPopoverWindow", "setFrame CALLED frame=(\(frameRect.origin.x),\(frameRect.origin.y),\(frameRect.size.width),\(frameRect.size.height)) display=\(flag) caller=\(caller)")
+        super.setFrame(frameRect, display: flag)
+    }
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool, animate: Bool) {
+        let caller = Thread.callStackSymbols.prefix(6).joined(separator: " | ")
+        mbkLog("MBKDebugPopoverWindow", "setFrame(animate) CALLED frame=(\(frameRect.origin.x),\(frameRect.origin.y),\(frameRect.size.width),\(frameRect.size.height)) animate=\(animate) caller=\(caller)")
+        super.setFrame(frameRect, display: flag, animate: animate)
+    }
+
+    override func setFrameOrigin(_ point: NSPoint) {
+        let caller = Thread.callStackSymbols.prefix(6).joined(separator: " | ")
+        mbkLog("MBKDebugPopoverWindow", "setFrameOrigin CALLED origin=(\(point.x),\(point.y)) caller=\(caller)")
+        super.setFrameOrigin(point)
+    }
+
+    override func setFrameTopLeftPoint(_ point: NSPoint) {
+        let caller = Thread.callStackSymbols.prefix(6).joined(separator: " | ")
+        mbkLog("MBKDebugPopoverWindow", "setFrameTopLeftPoint CALLED point=(\(point.x),\(point.y)) caller=\(caller)")
+        super.setFrameTopLeftPoint(point)
+    }
+}
+
+// MARK: - END DEBUG PROBE -----------------------------------------------------
 
 /// Manages the full NSPopover and NSStatusItem lifecycle for a macOS menu-bar app.
 /// Inject a root SwiftUI view and an MBKOverlayGate at init time, then call `setup()`
@@ -278,6 +330,9 @@ public final class MBKPopoverController: NSObject {
     private func openPopover() {
         guard let button = statusItem.button else { return }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        // DEBUG/#2245: inject debug window immediately after show() so we intercept
+        // any frame mutations AppKit makes during/after the anchor-geometry pass.
+        injectDebugWindow()
         // ❌ DO NOT replace with NSApp.activate() (no-arg, the macOS 14+ form).
         // That call causes the popover window to flicker between active and
         // inactive chrome on every open — visually broken. Confirmed and
@@ -287,7 +342,35 @@ public final class MBKPopoverController: NSObject {
         startEventMonitor()
     }
 
-    /// Sets the status-bar button highlight state.
+    // MARK: - DEBUG/#2245: window injection (remove before shipping)
+
+    /// Attempts to inject MBKDebugPopoverWindow as the popover's backing window
+    /// by swapping the window's class at runtime via object_setClass.
+    ///
+    /// This is diagnostic scaffolding only. object_setClass is safe here because
+    /// MBKDebugPopoverWindow only adds logging — it does not change instance
+    /// variable layout, add stored properties, or alter memory management.
+    ///
+    /// What we learn from this:
+    /// - If setFrame lines appear in the log during a side-jump → the public
+    ///   override point is reachable → subclassing can block the jump.
+    /// - If NO setFrame lines appear but the window x collapses to 0 → AppKit
+    ///   writes directly to the backing store → subclassing cannot help.
+    ///
+    /// ❌ DELETE this method and its call site in openPopover() before merging.
+    private func injectDebugWindow() {
+        guard let win = popover.contentViewController?.view.window else {
+            mbkLog("PopoverController", "injectDebugWindow — popover window is nil, cannot inject")
+            return
+        }
+        let originalClass = type(of: win)
+        mbkLog("PopoverController", "injectDebugWindow — popover window class=\(originalClass) frame=\(win.frame)")
+        object_setClass(win, MBKDebugPopoverWindow.self)
+        let newClass = type(of: win)
+        mbkLog("PopoverController", "injectDebugWindow — class swapped \(originalClass) → \(newClass)")
+    }
+
+    // MARK: - Sets the status-bar button highlight state.
     private func setButtonHighlight(_ on: Bool) {
         statusItem.button?.isHighlighted = on
     }
