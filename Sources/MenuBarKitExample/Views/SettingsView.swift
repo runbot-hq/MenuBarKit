@@ -76,10 +76,11 @@ struct SettingsView: View {
             }
 
             Divider()
-            Button("← Back") { appState.route = .main }
+            Button("\u2190 Back") { appState.route = .main }
         }
         .padding(16)
-        .frame(width: 320)
+        // Wide so arrow misalignment is immediately visible
+        .frame(width: 520)
         .onAppear    { print("[SettingsView] onAppear") }
         .onDisappear { print("[SettingsView] onDisappear") }
     }
