@@ -17,10 +17,15 @@
 //   On first open, show() is called with a 1pt positioningRect centred at
 //   button.bounds.midX. AppKit places the arrow correctly from the start.
 //
-//   On resize (applyContentSize), contentSize is written and show() is
-//   called again with the same positioningRect. With animates=false this
-//   is instantaneous. AppKit recomputes the arrow position from scratch
-//   using the new contentSize and the positioningRect — always correct.
+//   On resize (applyContentSize), contentSize is always written first.
+//   Then show() is called again with the same positioningRect — UNLESS the
+//   menu bar is hidden (auto-hide), in which case show() is skipped to avoid
+//   a side-jump. contentSize is still written even when the menu bar is
+//   hidden, so the content is correctly sized when the menu bar reappears.
+//
+//   ❌ Do NOT skip the contentSize write when isMenuBarHidden. The popover
+//   is still on screen; stale dimensions break AppKit's internal geometry
+//   and can cause an unexpected close on the next resize.
 //
 //   ❌ Do NOT use setFrameOrigin to correct the arrow after a contentSize
 //   write. popover.contentSize and pw.frame.width are not guaranteed to be
@@ -43,7 +48,7 @@
 //   Started when the popover opens, stopped when it closes.
 //
 // WORKSPACE OBSERVER — why queue: nil + Task { @MainActor }:
-//   queue: nil delivers on the poster’s thread; Task { @MainActor } is the
+//   queue: nil delivers on the poster's thread; Task { @MainActor } is the
 //   Swift 6-correct hop to the main actor.
 //
 // IMPLICIT-UNWRAPPED OPTIONALS (statusItem, popover, hostingController):
@@ -69,7 +74,7 @@
 //
 // SIDE-JUMP UNDER AUTO-HIDE MENUBAR:
 //   isMenuBarHidden = screenH < 0 || buttonY >= screenH
-//   applyContentSize skips entirely when true.
+//   show() re-anchor is skipped when true. contentSize write is NOT skipped.
 
 import AppKit
 import SwiftUI
@@ -204,8 +209,13 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
-    /// Writes the new contentSize then re-anchors the arrow by calling
-    /// show() again with the same 1pt positioningRect.
+    /// Writes the new contentSize, then re-anchors the arrow by calling
+    /// show() again — unless the menu bar is currently hidden (auto-hide),
+    /// in which case show() is skipped to avoid a side-jump.
+    ///
+    /// contentSize is ALWAYS written, even when the menu bar is hidden.
+    /// Skipping the write causes stale dimensions that break AppKit geometry
+    /// and can trigger an unexpected close on the next resize.
     ///
     /// With animates=false, show() on an already-shown popover is
     /// instantaneous — AppKit recomputes arrow position from scratch using
@@ -215,12 +225,15 @@ public final class MBKPopoverController: NSObject {
     /// and pw.frame.width are not in sync when this fires — AppKit may have
     /// auto-resized the window while contentSize still holds the previous
     /// value. Any chrome/delta math on those values is wrong.
-    ///
-    /// Skipped entirely when the auto-hide menubar is hidden (invalid geometry).
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
         let currentSize = popover.contentSize
+        guard abs(currentSize.width - preferred.width) > 1
+                || abs(currentSize.height - preferred.height) > 1 else {
+            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
+            return
+        }
         guard let button = statusItem.button,
               let buttonWin = button.window else {
             mbkLog("PopoverController", "applyContentSize — no button/window, skipping")
@@ -229,24 +242,20 @@ public final class MBKPopoverController: NSObject {
         let buttonY = buttonWin.frame.origin.y
         let screenH = buttonWin.screen?.frame.height ?? -1
         let isMenuBarHidden = screenH < 0 || buttonY >= screenH
-        mbkLog("PopoverController",
-               "applyContentSize — preferred=(\(preferred.width),\(preferred.height)) "
-               + "current=(\(currentSize.width),\(currentSize.height)) "
-               + "buttonY=\(buttonY) screenH=\(screenH) isMenuBarHidden=\(isMenuBarHidden)")
-        guard !isMenuBarHidden else {
-            mbkLog("PopoverController", "applyContentSize — SKIP: isMenuBarHidden")
-            return
-        }
-        guard abs(currentSize.width - preferred.width) > 1
-                || abs(currentSize.height - preferred.height) > 1 else {
-            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
-            return
-        }
 
         mbkLog("PopoverController",
                "applyContentSize — WRITING (\(preferred.width),\(preferred.height)) "
-               + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
+               + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height)) "
+               + "isMenuBarHidden=\(isMenuBarHidden)")
         popover.contentSize = preferred
+
+        if isMenuBarHidden {
+            // show() would produce a side-jump while the menu bar is hidden.
+            // Skip the re-anchor — arrow centering will correct itself on
+            // the next openPopover() call when the menu bar is visible again.
+            mbkLog("PopoverController", "applyContentSize — skip re-anchor: isMenuBarHidden")
+            return
+        }
 
         // Re-anchor: show() recomputes the arrow from the new contentSize
         // and the positioningRect. With animates=false: instantaneous.
