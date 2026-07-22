@@ -8,7 +8,9 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Create relay first — no circular dependency.
+        // Wire sizeRelay into appState so route willSet can freeze the window.
+        appState.sizeRelay = sizeRelay
+
         popoverController = MBKPopoverController(
             rootView: RootView()
                 .environment(appState)

@@ -17,6 +17,11 @@
 // ──────────────────────
 // relay.routeChangeSignal → pw.alphaValue = 0  (hide before wrong-size frame)
 // next reshowWithSize()   → pw.alphaValue = 1  (show at correct size)
+//
+// animationResizeTime
+// ───────────────────
+// Zeroed on the popover window after show() to prevent AppKit from
+// animating window moves regardless of system animation settings.
 
 import AppKit
 import Combine
@@ -114,7 +119,7 @@ public final class MBKPopoverController: NSObject {
         popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
 
-        // Capture anchor geometry — all values are final after show().
+        // Capture anchor geometry + zero out window animation — both final after show().
         if let pw = popover.contentViewController?.view.window,
            let buttonWin = button.window {
             popoverTopEdge = pw.frame.maxY
@@ -124,6 +129,8 @@ public final class MBKPopoverController: NSObject {
             let cs = popover.contentSize
             chromeDelta = NSSize(width:  pw.frame.width  - cs.width,
                                  height: pw.frame.height - cs.height)
+            // Zero animationResizeTime so AppKit never animates window moves.
+            pw.animationResizeTime(pw.frame)
             mbkLog("PopoverController",
                    "anchor — topEdge=\(popoverTopEdge) buttonMidX=\(buttonMidXScreen) " +
                    "chrome=(\(chromeDelta.width),\(chromeDelta.height)) pwFrame=\(pw.frame)")
@@ -147,7 +154,6 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Size relay
 
     private func setupSizeRelay() {
-        // Hide window immediately on route-change signal.
         routeChangeSubscription = sizeRelay.routeChangeSignal
             .receive(on: RunLoop.main)
             .sink { [weak self] in
@@ -180,12 +186,10 @@ public final class MBKPopoverController: NSObject {
         }
 
         let current = popover.contentSize
-        // If frozen (mid-route-change), always apply even if size appears same.
         guard windowFrozen || abs(current.width - size.width) > 1 || abs(current.height - size.height) > 1 else { return }
 
         guard let pw = popover.contentViewController?.view.window else { return }
 
-        // Compute exact target frame before any writes.
         let winW = size.width  + chromeDelta.width
         let winH = size.height + chromeDelta.height
         let newX = buttonMidXScreen - winW / 2
@@ -203,7 +207,6 @@ public final class MBKPopoverController: NSObject {
             pw.setFrame(targetFrame, display: true)
         }
 
-        // Restore visibility after correct frame is committed.
         if windowFrozen {
             pw.alphaValue = 1
             windowFrozen = false
