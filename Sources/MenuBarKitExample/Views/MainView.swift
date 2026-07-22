@@ -1,5 +1,9 @@
 // MainView.swift
 // MenuBarKitExample
+//
+// TEST BRANCH test/intrinsic-content-size-kvo: .frame(width: 260) removed.
+// This view's width is now whatever its own content (the button) needs,
+// via NSHostingView.intrinsicContentSize — no manual number declared here.
 
 import SwiftUI
 
@@ -15,7 +19,7 @@ struct MainView: View {
                 .buttonStyle(.borderedProminent)
         }
         .padding(16)
-        .frame(width: 260)
+        .fixedSize()
         .onAppear    { print("[MainView] onAppear") }
         .onDisappear { print("[MainView] onDisappear") }
     }
