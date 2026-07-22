@@ -8,17 +8,18 @@
 // ARROW CENTERING:
 //   show() pre-sizes contentSize to fittingSize so AppKit places the window
 //   at the correct width immediately. A 1pt positioningRect at button midX
-//   is used so AppKit anchors the arrow to the button center.
+//   is used so AppKit anchors the arrow to the button center on open.
 //
 //   On resize (applyContentSize):
 //     1. Write contentSize.
-//     2. Read pw.frame.width — this is the actual window width including
-//        NSPopover chrome (shadow + border), NOT equal to contentSize.width.
-//     3. Compute targetX = buttonMidX - windowW / 2, clamped to visibleFrame.
-//     4. Call setFrameOrigin with targetX.
+//     2. Call show() again with the same 1pt centerRect.
+//        Calling show() on an already-shown popover is a no-op for visibility
+//        but re-runs AppKit's anchor geometry, re-centering the arrow over
+//        the button. Manual setFrameOrigin is NOT used: the arrow position
+//        inside the NSPopover window is not simply windowW/2 and cannot be
+//        reliably computed without AppKit's internal layout pass.
 //
-//   Steps 1-4 happen back-to-back in the same runloop cycle.
-//   popover.animates = false ensures setFrameOrigin is instantaneous.
+//   popover.animates = false ensures no visible jump on the re-show.
 //
 // SIDE-JUMP UNDER AUTO-HIDE MENUBAR:
 //   Signal: buttonY >= screenH (Dock pushes NSStatusItem window off top edge).
@@ -110,13 +111,20 @@ public final class MBKPopoverController: NSObject {
             mbkLog("PopoverController", "openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
         }
 
+        showPopoverAnchored(to: button)
+        NSApp.activate(ignoringOtherApps: true)
+        mbkLog("PopoverController", "popover shown")
+        startEventMonitor()
+    }
+
+    /// Calls `popover.show(relativeTo:of:preferredEdge:)` with a 1pt rect at
+    /// button midX. Used both on initial open and after contentSize writes to
+    /// re-anchor AppKit's arrow geometry.
+    private func showPopoverAnchored(to button: NSStatusBarButton) {
         let midX = button.bounds.midX
         let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
                                 width: 1, height: button.bounds.height)
         popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
-        NSApp.activate(ignoringOtherApps: true)
-        mbkLog("PopoverController", "popover shown")
-        startEventMonitor()
     }
 
     private func setButtonHighlight(_ on: Bool) {
@@ -150,17 +158,15 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
-    /// Writes a new contentSize to the popover and corrects the window x so
-    /// the arrow stays centered over the status item button.
+    /// Writes a new contentSize to the popover and re-anchors the arrow.
     ///
-    /// Order matters:
-    ///   1. Write `popover.contentSize = preferred`
-    ///   2. Read `pw.frame.width` — now reflects actual window width including
-    ///      NSPopover chrome (shadow + border). Using this, NOT preferred.width,
-    ///      is correct: the chrome adds a constant offset and centering on
-    ///      preferred.width would consistently place the window off-center.
-    ///   3. Compute targetX = buttonMidX - windowW / 2, clamped.
-    ///   4. Call `pw.setFrameOrigin(targetX)` in the same runloop cycle.
+    /// After writing contentSize, calls show() again with the same 1pt
+    /// centerRect at button midX. This re-runs AppKit's anchor geometry so
+    /// the arrow stays centered regardless of chrome or internal layout.
+    ///
+    /// Manual setFrameOrigin is NOT used: the arrow's x position inside the
+    /// NSPopover window is not windowW/2 and cannot be reliably computed
+    /// without AppKit's own pass.
     ///
     /// Skips the write when the auto-hide menubar is hidden (buttonY >= screenH).
     /// Falls back to NSScreen.main when buttonWin.screen is transiently nil.
@@ -197,40 +203,18 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        guard let screen = resolvedScreen,
-              let pw = popover.contentViewController?.view.window else {
-            popover.contentSize = preferred
-            mbkLog("PopoverController", "applyContentSize — written (no screen for reposition)")
-            return
-        }
-
-        let buttonMidX = buttonWin.frame.minX + button.frame.midX
-
         mbkLog("PopoverController",
                "applyContentSize — WRITING (\(preferred.width),\(preferred.height)) "
-               + "buttonMidX=\(buttonMidX) "
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
 
-        // Step 1: write contentSize.
+        // Write contentSize then immediately re-anchor via show().
+        // show() on an already-shown popover is a no-op for visibility but
+        // re-runs AppKit's internal anchor geometry, correctly placing the
+        // arrow over the button center. animates=false prevents any flash.
         popover.contentSize = preferred
+        showPopoverAnchored(to: button)
 
-        // Step 2: read pw.frame.width AFTER the write — this is the actual
-        // window width including NSPopover chrome (shadow + border).
-        // ❌ Do NOT use preferred.width: it does not include chrome and will
-        // place the window consistently off-center by half the chrome width.
-        let windowW = pw.frame.width
-        let targetX = max(
-            screen.visibleFrame.minX,
-            min(buttonMidX - windowW / 2,
-                screen.visibleFrame.maxX - windowW)
-        )
-
-        // Step 3: reposition. Same runloop cycle as the contentSize write.
-        pw.setFrameOrigin(NSPoint(x: targetX, y: pw.frame.origin.y))
-
-        mbkLog("PopoverController",
-               "applyContentSize — done windowW=\(windowW) targetX=\(targetX) "
-               + "popoverWin=(\(pw.frame.origin.x),\(pw.frame.origin.y),\(pw.frame.width),\(pw.frame.height))")
+        mbkLog("PopoverController", "applyContentSize — done")
     }
 
     // MARK: - Workspace observer
