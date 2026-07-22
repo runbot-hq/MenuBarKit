@@ -2,36 +2,18 @@
 // MenuBarKit
 //
 // *** TEST BRANCH: test/intrinsic-content-size-kvo ***
-// This is an EXPERIMENT, not a replacement for the working implementation
-// on fix/popover-arrow-centering. If this doesn't pan out, this branch
-// gets deleted and nothing here ships.
+// Experiment: let NSHostingView.intrinsicContentSize (with sizingOptions
+// enabled) drive popover size, instead of caller-declared Route.contentSize.
 //
-// WHAT'S DIFFERENT FROM THE WORKING VERSION:
-//   The working version (fix/popover-arrow-centering) makes size 100%
-//   caller-declared via setContentSize(_:) + Route.contentSize. That
-//   works but requires hand-maintaining a size table that can drift out
-//   of sync with each view's actual .frame(width:).
-//
-//   This experiment tries NSHostingView.sizingOptions = [.intrinsicContentSize]
-//   plus KVO on hostingView.intrinsicContentSize, instead of a manual
-//   table. This is NOT the same mechanism as the fittingSize/GeometryReader
-//   attempts from earlier tonight:
-//     - fittingSize / GeometryReader both ask "given the frame you
-//       currently have, what size do you report" — circular once we set
-//       that frame ourselves.
-//     - .intrinsicContentSize with sizingOptions enabled makes
-//       NSHostingView run SwiftUI's real layout solver to compute the
-//       content's ideal size, independent of the view's current .frame.
-//       It's the same AppKit contract as any other view with an
-//       intrinsic content size (like NSTextField) — Apple added this
-//       specifically so NSHostingView could report a real size to
-//       Auto-Layout-driven or manually-driven AppKit containers.
-//
-//   IF THIS IS ALSO CIRCULAR IN PRACTICE (i.e. intrinsicContentSize just
-//   echoes back frame.size once we start setting the frame ourselves),
-//   that will show up immediately in the logs below as a size that never
-//   changes on route switch. That's the acceptance test for this
-//   experiment — if it fails, revert to Route.contentSize.
+// FIX vs. previous commit on this branch: the KVO observation closure is
+// technically nonisolated (NSKeyValueObservation callbacks are not
+// main-actor by default), so calling the @MainActor-isolated applySize(_:)
+// directly from it triggered "main actor-isolated instance method called in
+// a synchronous nonisolated context" and, worse, appears to have silently
+// no-op'd rather than hopping onto the main actor — KVO never visibly fired
+// in the previous test run's logs. Wrapping the call in
+// `Task { @MainActor in ... }` makes the actor hop explicit and awaited
+// instead of implicit and apparently dropped.
 
 import AppKit
 import SwiftUI
@@ -76,10 +58,9 @@ public final class MBKPopoverController: NSObject {
 
     // MARK: - Public API
 
-    /// Manual override, retained for compatibility with existing callers
-    /// (e.g. AppDelegate's initial contentSize:). Once intrinsicContentSize
-    /// KVO fires for real, that becomes the source of truth for as long as
-    /// this experiment is active.
+    /// Kept only as the initial fallback size before the first real
+    /// intrinsicContentSize KVO fire. Not called by RootView anymore on
+    /// this test branch — see RootView.swift.
     public func setContentSize(_ size: NSSize) {
         applySize(size, source: "setContentSize (manual)")
     }
@@ -120,11 +101,6 @@ public final class MBKPopoverController: NSObject {
 
     private func setupWindow() {
         hostingView = NSHostingView(rootView: rootView)
-
-        // *** THE EXPERIMENT ***
-        // Ask NSHostingView to compute and report its intrinsicContentSize
-        // from SwiftUI's real layout solver, rather than deriving size from
-        // whatever frame we happen to have assigned it.
         hostingView.sizingOptions = [.intrinsicContentSize]
 
         arrowView = MBKArrowView()
@@ -153,18 +129,20 @@ public final class MBKPopoverController: NSObject {
 
         window = win
 
-        // KVO on intrinsicContentSize — NOT on .frame. This is the
-        // distinguishing test: does intrinsicContentSize actually change
-        // independently of the frame we impose in applySize()?
+        // Explicit main-actor hop via Task, not an implicit isolated call
+        // from a nonisolated KVO callback context.
         intrinsicSizeObservation = hostingView.observe(\.intrinsicContentSize, options: [.new]) { [weak self] _, change in
-            guard let self, let newValue = change.newValue else { return }
-            mbkLog("PopoverController", "KVO intrinsicContentSize fired — (\(newValue.width),\(newValue.height))")
-            guard newValue.width > 0, newValue.height > 0,
-                  newValue.width.isFinite, newValue.height.isFinite else {
-                mbkLog("PopoverController", "KVO intrinsicContentSize — ignoring invalid/placeholder value")
-                return
+            guard let newValue = change.newValue else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                mbkLog("PopoverController", "KVO intrinsicContentSize fired — (\(newValue.width),\(newValue.height))")
+                guard newValue.width > 0, newValue.height > 0,
+                      newValue.width.isFinite, newValue.height.isFinite else {
+                    mbkLog("PopoverController", "KVO intrinsicContentSize — ignoring invalid/placeholder value")
+                    return
+                }
+                self.applySize(newValue, source: "KVO intrinsicContentSize")
             }
-            self.applySize(newValue, source: "KVO intrinsicContentSize")
         }
     }
 
