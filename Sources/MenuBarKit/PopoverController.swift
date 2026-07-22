@@ -3,16 +3,24 @@
 //
 // Arrow centering strategy
 // ────────────────────────
-// setFrameOrigin / contentSize alone fight AppKit's internal anchor that is
-// stored at show() time. Every contentSize write causes AppKit to recompute x
-// from that stale anchor, undoing any manual correction.
+// setFrameOrigin / contentSize alone fight AppKit's internal anchor stored
+// at show() time. Every contentSize write causes AppKit to recompute x from
+// that stale anchor, undoing any manual correction.
 //
 // The only API that atomically resets both size AND anchor is
 //   show(relativeTo:of:preferredEdge:)
 // Calling it on an already-visible popover repositions it instantly.
-// We call it every time the content size changes, passing the same 1pt
-// centerRect built from button.bounds.midX so the arrow always lands on
-// the button centre regardless of content width.
+// We call it on every content-size change, passing the same 1pt centerRect
+// built from button.bounds.midX so the arrow always lands on the button
+// centre regardless of content width.
+//
+// show() also recalculates y. To avoid a vertical jump we capture y before
+// the call and restore it immediately after.
+//
+// Sizing signal
+// ─────────────
+// .mbkReportSize() (GeometryReader + PreferenceKey) pushes sizes into
+// MBKSizeRelay.subject. A 16 ms debounce collapses burst layout passes.
 
 import AppKit
 import Combine
@@ -128,18 +136,36 @@ public final class MBKPopoverController: NSObject {
         guard size.width > 0, size.height > 0 else { return }
         guard let button = statusItem.button,
               let buttonWin = button.window else { return }
+
         let buttonY = buttonWin.frame.origin.y
         let screenH = buttonWin.screen?.frame.height ?? -1
         guard screenH < 0 || buttonY < screenH else {
             mbkLog("PopoverController", "reshowWithSize — menu bar hidden, skipping")
             return
         }
+
         let current = popover.contentSize
         guard abs(current.width - size.width) > 1 || abs(current.height - size.height) > 1 else { return }
+
         mbkLog("PopoverController",
                "reshowWithSize — (\(size.width),\(size.height)) prev=(\(current.width),\(current.height))")
+
+        // Capture y before show() so we can restore it.
+        // show() recalculates the full window position; x is correct (anchored
+        // to button midX) but y may drift. We keep the y AppKit chose at the
+        // original openPopover() call.
+        let previousY = popover.contentViewController?.view.window?.frame.origin.y
+
         popover.contentSize = size
         popover.show(relativeTo: centerRect(for: button), of: button, preferredEdge: .minY)
+
+        if let pw = popover.contentViewController?.view.window,
+           let y = previousY {
+            if pw.frame.origin.y != y {
+                mbkLog("PopoverController", "reshowWithSize — restoring y \(pw.frame.origin.y) → \(y)")
+                pw.setFrameOrigin(NSPoint(x: pw.frame.origin.x, y: y))
+            }
+        }
     }
 
     // MARK: - Helpers
