@@ -142,25 +142,15 @@ public final class MBKPopoverController: NSObject {
     ///     an async re-layout that visibly SNAPS the window to its new
     ///     position (a well-known AppKit quirk) — trading arrow drift for an
     ///     equally visible side-jump.
-    ///   - Writing contentSize on the STILL-SHOWN popover before close+
-    ///     reshow makes AppKit run its own in-place resize/relayout on the
-    ///     live window immediately, which is itself a visible side-jump
-    ///     that happens before we ever get to close+reshow.
-    ///   - Even with correct close → resize-while-hidden → reshow ordering,
-    ///     performClose() and show() are two SEPARATE window-server
-    ///     transactions. The window server is free to flush the
-    ///     intermediate "closed" state to the display before the
-    ///     "reshown" state arrives, and that stray intermediate flush is
-    ///     itself visible as a side-jump.
     ///
-    /// WHY THIS WORKS:
-    ///   The entire close → resize → reshow sequence is bracketed with
-    ///   NSDisableScreenUpdates()/NSEnableScreenUpdates(), which forces the
-    ///   window server to treat it as a single atomic redraw. Only the
-    ///   final, correctly anchored frame (window + arrow computed together
-    ///   via show(relativeTo:of:preferredEdge:), exactly as on first open)
-    ///   is ever actually flushed to the screen — no intermediate closed
-    ///   or stale-size frame is ever visible.
+    /// WHY CLOSE + RESHOW WORKS:
+    ///   show(relativeTo:of:preferredEdge:) always performs a full, fresh
+    ///   AppKit layout pass — window frame and arrow tip are computed
+    ///   together from positioningRect and contentSize, exactly as on first
+    ///   open. Since popover.animates = false, close+reshow is visually
+    ///   instantaneous (no flicker), and this guarantees the window and
+    ///   arrow are always consistent, regardless of how the width changes
+    ///   between views.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -190,33 +180,38 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        // Close, resize, and reshow, but wrap the whole sequence between
-        // NSDisableScreenUpdates()/NSEnableScreenUpdates(). Without this,
-        // performClose() and show() are two SEPARATE window-server
-        // transactions: even though our Swift call order is correct and
-        // the resize happens while hidden, the window server is still free
-        // to composite/flush the "closed" state to the display before the
-        // "reshown" state arrives, and that intermediate flush is exactly
-        // what is visible as a side-jump. Bracketing the sequence forces
-        // the window server to treat close+resize+reshow as a single
-        // atomic redraw, so only the final, correctly anchored frame is
-        // ever actually flushed to screen. Suppress the delegate's side
-        // effects (highlight/eventMonitor/overlayGate reset) since this
-        // isn't a user-driven dismiss.
+        // Close, resize, and reshow, wrapped in an NSAnimationContext group
+        // with duration 0 and implicit animation disabled, rather than
+        // NSDisableScreenUpdates()/NSEnableScreenUpdates(). The legacy
+        // screen-lock functions are deprecated because they only suppress
+        // updates for the classic (non-layer-backed) window-server path —
+        // on modern layer-backed windows (which NSHostingController's view
+        // is), Core Animation can still commit and flush an intermediate
+        // "closed" frame independently, which is exactly what showed up as
+        // a side-jump even with the legacy calls in place.
+        // NSAnimationContext.runAnimationGroup batches all AppKit/CA work
+        // performed inside the closure into a single CATransaction commit,
+        // so the closed-window frame and the reshown-window frame are
+        // coalesced into one atomic screen update — only the final,
+        // correctly anchored frame ever reaches the display. Suppress the
+        // delegate's side effects (highlight/eventMonitor/overlayGate
+        // reset) since this isn't a user-driven dismiss.
         isReanchoring = true
-        NSDisableScreenUpdates()
-        popover.performClose(nil)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            popover.performClose(nil)
 
-        mbkLog("PopoverController",
-               "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
-               + "prev=(\(currentSize.width),\(currentSize.height)) while closed")
-        popover.contentSize = preferred
+            mbkLog("PopoverController",
+                   "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
+                   + "prev=(\(currentSize.width),\(currentSize.height)) while closed")
+            popover.contentSize = preferred
 
-        let midX = button.bounds.midX
-        let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
-                                width: 1, height: button.bounds.height)
-        popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
-        NSEnableScreenUpdates()
+            let midX = button.bounds.midX
+            let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
+                                    width: 1, height: button.bounds.height)
+            popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
+        }
         isReanchoring = false
         mbkLog("PopoverController", "applyContentSize — re-shown at new size, arrow re-centered")
     }
