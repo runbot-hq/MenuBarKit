@@ -6,10 +6,16 @@
 // is injected via closures at configuration time.
 //
 // ARROW CENTERING:
-//   The arrow tip is at the horizontal center of the content view in screen
-//   space. repositionPopoverWindow measures the real chromeLeft from the live
-//   window AFTER contentSize is written and AFTER a DispatchQueue.main.async
-//   hop so AppKit has completed its layout pass.
+//   show(relativeTo:of:preferredEdge:) with a 1pt rect at button.bounds.midX
+//   is the ONLY reliable way to center the arrow. All manual setFrameOrigin
+//   approaches fail because the NSPopover chrome is asymmetric and AppKit
+//   re-flows the window position after contentSize changes.
+//
+//   On resize (applyContentSize):
+//     1. Write contentSize.
+//     2. Dismiss with close() (no animation, no delegate side-effects).
+//     3. Re-show with show() using the same centerRect.
+//   popover.animates = false means no flicker.
 //
 // SIDE-JUMP UNDER AUTO-HIDE MENUBAR:
 //   buttonY > screenH (strictly) = hidden. buttonY == screenH = visible.
@@ -38,6 +44,8 @@ public final class MBKPopoverController: NSObject {
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
+    /// Prevents popoverDidClose side-effects during a programmatic close+reopen cycle.
+    private var isReopening = false
     /// Size skipped during a menubar-hidden transient; drained on next visible call.
     private var pendingContentSize: NSSize?
 
@@ -89,58 +97,26 @@ public final class MBKPopoverController: NSObject {
 
     private func openPopover() {
         guard let button = statusItem.button else { return }
-
         let fitting = hostingController.view.fittingSize
         if fitting.width > 0, fitting.height > 0 {
             popover.contentSize = fitting
             mbkLog("PopoverController", "openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
         }
         pendingContentSize = nil
-
-        let midX = button.bounds.midX
-        let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
-                                width: 1, height: button.bounds.height)
-        popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
-
-        // Defer reposition one runloop turn so AppKit finishes placing the window.
-        let preferredSize = popover.contentSize
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.popover.isShown else { return }
-            self.repositionPopoverWindow(preferred: preferredSize, button: button, label: "openPopover")
-        }
-
+        showPopoverAnchored(to: button)
         NSApp.activate(ignoringOtherApps: true)
         mbkLog("PopoverController", "popover shown")
         startEventMonitor()
     }
 
-    /// Moves the popover window so the arrow (content view horizontal center)
-    /// lands exactly over the status item button's midX.
-    /// Measures chromeLeft live from the window after layout has settled.
-    private func repositionPopoverWindow(preferred: NSSize, button: NSStatusBarButton, label: String) {
-        guard let pw = popover.contentViewController?.view.window,
-              let buttonWin = button.window,
-              let screen = buttonWin.screen ?? NSScreen.main else { return }
-
-        let contentView = popover.contentViewController!.view
-        let cvFrameInWindow = contentView.frame
-        let chromeLeft  = cvFrameInWindow.minX
-        let chromeRight = pw.frame.width - cvFrameInWindow.maxX
-
-        let buttonMidX = buttonWin.frame.minX + button.frame.midX
-        let targetX = max(
-            screen.visibleFrame.minX,
-            min(buttonMidX - chromeLeft - preferred.width / 2,
-                screen.visibleFrame.maxX - pw.frame.width)
-        )
-        pw.setFrameOrigin(NSPoint(x: targetX, y: pw.frame.origin.y))
-
-        mbkLog("PopoverController",
-               "reposition[\(label)] — preferred.w=\(preferred.width) "
-               + "winW=\(pw.frame.width) cvFrame=(\(cvFrameInWindow.origin.x),\(cvFrameInWindow.origin.y),\(cvFrameInWindow.width),\(cvFrameInWindow.height)) "
-               + "chromeLeft=\(chromeLeft) chromeRight=\(chromeRight) "
-               + "buttonMidX=\(buttonMidX) targetX=\(targetX) "
-               + "finalWin=(\(pw.frame.origin.x),\(pw.frame.origin.y),\(pw.frame.width),\(pw.frame.height))")
+    /// Calls show() with a 1pt rect at button midX. This is the canonical
+    /// anchor call — AppKit centers the arrow over this rect reliably.
+    private func showPopoverAnchored(to button: NSStatusBarButton) {
+        let midX = button.bounds.midX
+        let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
+                                width: 1, height: button.bounds.height)
+        popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
+        mbkLog("PopoverController", "showPopoverAnchored — midX=\(midX)")
     }
 
     private func setButtonHighlight(_ on: Bool) {
@@ -174,6 +150,9 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
+    /// Writes a new contentSize and re-anchors the arrow by closing and
+    /// reopening the popover. This is the only reliable way to make AppKit
+    /// re-center the arrow — manual window repositioning is unreliable.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -216,20 +195,21 @@ public final class MBKPopoverController: NSObject {
         }
 
         mbkLog("PopoverController",
-               "applyContentSize — WRITING (\(preferred.width),\(preferred.height)) "
+               "applyContentSize — REOPEN (\(preferred.width),\(preferred.height)) "
                + "forceReanchor=\(forceReanchor) "
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
 
+        // Write the new size.
         popover.contentSize = preferred
 
-        // Defer one runloop turn so AppKit finishes resizing the window
-        // before we measure chromeLeft and call setFrameOrigin.
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.popover.isShown else { return }
-            self.repositionPopoverWindow(preferred: preferred, button: button, label: "applyContentSize")
-        }
+        // Close without triggering popoverDidClose side-effects, then reshow.
+        // animates=false means this is invisible to the user.
+        isReopening = true
+        popover.close()
+        isReopening = false
+        showPopoverAnchored(to: button)
 
-        mbkLog("PopoverController", "applyContentSize — done (reposition deferred)")
+        mbkLog("PopoverController", "applyContentSize — done")
     }
 
     // MARK: - Workspace observer
@@ -297,12 +277,19 @@ extension MBKPopoverController: NSPopoverDelegate {
     }
 
     public func popoverShouldClose(_ popover: NSPopover) -> Bool {
+        // During a reopen cycle, always allow the close.
+        if isReopening { return true }
         let block = overlayGate.hasActiveOverlay
         mbkLog("PopoverController", "popoverShouldClose blocked=\(block)")
         return !block
     }
 
     public func popoverDidClose(_ notification: Notification) {
+        // Skip side-effects during a programmatic close+reopen cycle.
+        guard !isReopening else {
+            mbkLog("PopoverController", "popoverDidClose — reopen in progress, skipping side-effects")
+            return
+        }
         mbkLog("PopoverController", "popoverDidClose")
         setButtonHighlight(false)
         stopEventMonitor()
