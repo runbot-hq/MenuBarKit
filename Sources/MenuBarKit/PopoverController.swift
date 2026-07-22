@@ -126,6 +126,17 @@
 //   Task { @MainActor } wrapper around the deinit removals; that would be
 //   a use-after-free (self is already deallocated when the Task runs).
 //
+// ARROW CENTERING — positioningRect at button midX:
+//   NSPopover.show(relativeTo:of:preferredEdge:) anchors the arrow to the
+//   midX of the positioningRect. Passing button.bounds makes the arrow point
+//   at the button center, but AppKit then shifts the popover leftward to keep
+//   it on-screen — so the arrow appears off-center relative to the popover body.
+//
+//   Fix: pass a 1pt-wide rect centered on button.bounds.midX as the
+//   positioningRect. AppKit still points the arrow at the button, but now
+//   "the button" is a 1pt slice at the center, so the popover is centered
+//   under the button and the arrow appears at the top-center of the popover.
+//
 // SIDE-JUMP UNDER AUTO-HIDE MENUBAR (HIDDEN STATE) — fix/side-jump-autohide:
 //   When macOS auto-hide menubar is hidden the Dock pushes the NSStatusItem
 //   button window off the top edge: buttonWin.frame.origin.y >= screen.frame.height.
@@ -133,9 +144,14 @@
 //   geometry against the off-screen button position, collapsing the popover
 //   x-origin to 0 (side-jump).
 //
-//   `sizingOptions = .preferredContentSize` causes AppKit to write contentSize
-//   automatically on every SwiftUI preferredContentSize KVO change — e.g. when
-//   the host app switches routes (main <-> settings). This is the trigger.
+//   Root cause: with sizingOptions = .preferredContentSize, AppKit writes
+//   contentSize automatically on every SwiftUI layout change. With sizingOptions
+//   empty, preferredContentSize is never recomputed and KVO on it never fires.
+//
+//   Correct approach: observe hostingController.view \/.frame via KVO.
+//   The hosting view frame IS updated live by SwiftUI on every layout pass
+//   regardless of sizingOptions. Apply the isMenuBarHidden guard before
+//   writing popover.contentSize.
 //
 //   CORRECT isMenuBarHidden signal:
 //     screenH < 0 || buttonY >= screenH
@@ -155,11 +171,6 @@
 //     Hidden:  buttonY=982, screenH=982  OR  buttonY=-1, screenH=-1 (screen nil)
 //     Visible: buttonY=949, screenH=982
 //
-//   Fix: replace sizingOptions = .preferredContentSize with a manual KVO
-//   observer on preferredContentSize. The observer checks isMenuBarHidden
-//   before writing contentSize. When hidden the write is skipped — the current
-//   size is already correct (SwiftUI laid out fine). The next KVO fire after
-//   the menubar re-appears has a valid button position and writes normally.
 //   See runbot-hq/run-bot#2239.
 
 import AppKit
@@ -194,9 +205,12 @@ public final class MBKPopoverController: NSObject {
     /// Hosts the root SwiftUI view. Assigned in `setup()` — see IMPLICIT-UNWRAPPED OPTIONALS in the file header.
     private var hostingController: NSHostingController<AnyView>!
 
-    /// KVO token for `NSHostingController.preferredContentSize`.
-    /// Used instead of `sizingOptions = .preferredContentSize` so we can guard
-    /// against contentSize writes while the auto-hide menubar is hidden.
+    /// KVO token for `hostingController.view.frame`.
+    /// We observe the hosting view frame — not preferredContentSize — because
+    /// preferredContentSize is only recomputed when sizingOptions includes
+    /// .preferredContentSize. With sizingOptions empty (required to prevent
+    /// the side-jump), preferredContentSize never changes and KVO never fires.
+    /// The hosting view frame IS updated live by SwiftUI on every layout pass.
     /// See SIDE-JUMP UNDER AUTO-HIDE MENUBAR in the file header.
     private var sizeObservation: NSKeyValueObservation?
 
@@ -274,10 +288,19 @@ public final class MBKPopoverController: NSObject {
         }
     }
 
-    /// Shows the popover anchored to the status-bar button and starts the event monitor.
+    /// Shows the popover anchored to the center of the status-bar button.
+    ///
+    /// We pass a 1pt-wide positioningRect at button.bounds.midX instead of
+    /// button.bounds. This makes AppKit treat the button center as the anchor
+    /// point, so the popover is horizontally centered under the button and the
+    /// arrow appears at the top-center of the popover body regardless of width.
+    /// See ARROW CENTERING in the file header.
     private func openPopover() {
         guard let button = statusItem.button else { return }
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        let midX = button.bounds.midX
+        let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
+                                width: 1, height: button.bounds.height)
+        popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
         // ❌ DO NOT replace with NSApp.activate() (no-arg, the macOS 14+ form).
         // That call causes the popover window to flicker between active and
         // inactive chrome on every open — visually broken. Confirmed and
@@ -300,8 +323,9 @@ public final class MBKPopoverController: NSObject {
     /// That causes AppKit to write `popover.contentSize` automatically on every
     /// SwiftUI preferredContentSize change, including while the auto-hide menubar
     /// is hidden. Any contentSize write with the button off-screen causes a
-    /// side-jump. Instead, a manual KVO observer in `setupSizeObserver()` guards
-    /// the write on `isMenuBarHidden`. See SIDE-JUMP note in the file header.
+    /// side-jump. Instead, a manual KVO observer in `setupSizeObserver()` observes
+    /// the hosting view frame and guards the write on `isMenuBarHidden`.
+    /// See SIDE-JUMP note in the file header.
     private func setupPopover() {
         hostingController = NSHostingController(rootView: rootView)
         // ❌ Do NOT restore sizingOptions = .preferredContentSize — see doc comment above.
@@ -315,37 +339,41 @@ public final class MBKPopoverController: NSObject {
         setupSizeObserver()
     }
 
-    // MARK: - Preferred content size observer
+    // MARK: - Hosting view frame observer
 
-    /// Installs a KVO observer on `NSHostingController.preferredContentSize`.
+    /// Installs a KVO observer on `hostingController.view.frame`.
     ///
-    /// This replaces `sizingOptions = .preferredContentSize`. Both approaches
-    /// update `popover.contentSize` when SwiftUI's layout changes, but the
-    /// manual observer lets us guard the write when the auto-hide menubar is
-    /// hidden (screenH < 0 || buttonY >= screenH), preventing the side-jump.
+    /// We observe the hosting view frame — not `preferredContentSize` — because
+    /// `preferredContentSize` is only recomputed when `sizingOptions` includes
+    /// `.preferredContentSize`. With `sizingOptions` empty (required to prevent
+    /// the side-jump), `preferredContentSize` never changes and KVO on it never fires.
     ///
-    /// See SIDE-JUMP UNDER AUTO-HIDE MENUBAR in the file header.
+    /// The hosting view frame IS updated live by SwiftUI on every layout pass,
+    /// making it the correct source of truth for driving `popover.contentSize`.
+    ///
+    /// The same `isMenuBarHidden` guard is applied before writing `popover.contentSize`
+    /// to prevent the side-jump. See SIDE-JUMP UNDER AUTO-HIDE MENUBAR in the file header.
     private func setupSizeObserver() {
-        sizeObservation = hostingController.observe(
-            \.preferredContentSize,
+        sizeObservation = hostingController.view.observe(
+            \.frame,
             options: [.new]
-        ) { [weak self] controller, _ in
+        ) { [weak self] view, _ in
             Task { @MainActor [weak self] in
-                self?.applyPreferredContentSize(controller.preferredContentSize)
+                self?.applyPreferredContentSize(view.frame.size)
             }
         }
     }
 
-    /// Applies a new preferred content size to the popover, guarding against
-    /// side-jump when the auto-hide menubar is hidden.
+    /// Applies a new content size to the popover, guarding against side-jump
+    /// when the auto-hide menubar is hidden.
     ///
-    /// Called from the `preferredContentSize` KVO observer.
+    /// Called from the hosting view `frame` KVO observer.
     /// The write is skipped when `screenH < 0 || buttonY >= screenH`:
     ///   - `screenH < 0` means `button.window.screen` is nil — the button window
     ///     has been slid off the screen edge by the Dock (screen association dropped).
     ///   - `buttonY >= screenH` is the normal hidden case where screen is still
     ///     associated but the window origin is at or beyond screen height.
-    /// Either condition means AppKit's anchor geometry is invalid; skip the write.
+    /// Either condition means AppKit’s anchor geometry is invalid; skip the write.
     /// See SIDE-JUMP UNDER AUTO-HIDE MENUBAR in the file header.
     private func applyPreferredContentSize(_ preferred: NSSize) {
         guard popover.isShown else {
