@@ -44,10 +44,10 @@
 //   ❌ Do NOT set animates=true. The alpha trick only works because show()
 //   is synchronous when animates=false.
 //
-// SIDE-JUMP UNDER AUTO-HIDE MENUBAR:
-//   isMenuBarHidden = screenH < 0 || buttonY >= screenH
-//   Both contentSize write and show() re-anchor are skipped when true —
-//   no valid screen geometry is available in that state.
+//   ❌ Do NOT add an isMenuBarHidden guard. buttonWin.frame.origin.y drifts
+//   after large resizes and misfires even with the menu bar fully visible.
+//   The guard was only needed to suppress the side-jump from show() — the
+//   alphaValue=0 bracket already does that. No guard needed.
 //
 // STAY-OPEN-WHILE-SHEET-ACTIVE — deliberate trade-off:
 //   When a sheet (or file picker) is live, MBKPopoverController keeps the
@@ -229,8 +229,6 @@ public final class MBKPopoverController: NSObject {
     /// setting pw.alphaValue=0 before the call and restoring it after.
     /// With animates=false, show() is synchronous — the window is fully
     /// repositioned before alphaValue is restored in the same runloop cycle.
-    ///
-    /// Skipped entirely when isMenuBarHidden — no valid screen geometry.
     private func applyContentSize(_ preferred: NSSize) {
         guard popover.isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
@@ -241,16 +239,8 @@ public final class MBKPopoverController: NSObject {
             return
         }
         guard let button = statusItem.button,
-              let buttonWin = button.window,
               let pw = popover.contentViewController?.view.window else {
             mbkLog("PopoverController", "applyContentSize — no button/window, skipping")
-            return
-        }
-        let buttonY = buttonWin.frame.origin.y
-        let screenH = buttonWin.screen?.frame.height ?? -1
-        let isMenuBarHidden = screenH < 0 || buttonY >= screenH
-        guard !isMenuBarHidden else {
-            mbkLog("PopoverController", "applyContentSize — SKIP: isMenuBarHidden")
             return
         }
 
