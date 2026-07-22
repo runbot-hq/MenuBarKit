@@ -161,11 +161,11 @@ public final class MBKPopoverController: NSObject {
             .background(
                 GeometryReader { geo in
                     Color.clear
-                        .onChange(of: geo.size) { _, newSize in
-                            applyContentSize(newSize)
+                        .onChange(of: geo.size) { [weak self] _, newSize in
+                            self?.applyContentSize(newSize)
                         }
-                        .onAppear {
-                            applyContentSize(geo.size)
+                        .onAppear { [weak self] in
+                            self?.applyContentSize(geo.size)
                         }
                 }
             )
