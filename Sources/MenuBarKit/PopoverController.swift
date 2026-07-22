@@ -14,24 +14,26 @@
 //   box around positioningRect ONCE, at show() time. Mutating contentSize.width
 //   (or re-assigning positioningRect) on an already-visible popover does NOT
 //   re-trigger that centering — the box just grows/shrinks from a fixed edge,
-//   desyncing visibly from the arrow. Also note: positioningRect is derived
-//   purely from button.bounds, which never changes between calls, so
-//   "re-assigning" it to an already-shown popover is a no-op regardless of
-//   the new contentSize — it was never going to move anything.
+//   desyncing visibly from the arrow.
 //
 //   FIX: when a width change is detected, close the popover and call show()
 //   again fresh (mirroring openPopover()'s exact call shape) rather than
-//   mutating contentSize in place. A fresh show() re-triggers AppKit's own
-//   anchor-centering math against the new size. popover.animates = false
-//   makes this invisible to the user — no flicker, no visible close/reopen.
+//   mutating contentSize in place. popover.animates = false makes this
+//   invisible to the user — no flicker.
+//
+//   ⚠️  CRITICAL GOTCHA — SIZE OBSERVATION: NSView implements MANUAL KVO for
+//      `frame`, gated behind `postsFrameChangedNotifications` (defaults to
+//      false). Swift's `.observe(\.frame)` SILENTLY NO-OPS without it — no
+//      crash, no warning, the closure simply never runs. This bit us for two
+//      full commits: our width-reshow logic was 100% correct but dead code,
+//      because the observer that was supposed to call it never fired even
+//      once. ALWAYS set `postsFrameChangedNotifications = true` and use
+//      NotificationCenter + `NSView.frameDidChangeNotification` to observe
+//      NSView frame changes — never rely on KVO `.observe(\.frame)` for this.
 //
 //   ❌ NEVER call pw.setFrameOrigin() / mutate the popover window's frame
 //      directly to "correct" its x position. AppKit computes the arrow's
-//      position from positioningRect/anchor at show()-time only. Manually
-//      moving the window afterward creates two disagreeing authorities.
-//
-//   ❌ NEVER read buttonWin.frame / screen.frame for manual correction —
-//      those values go transiently invalid during menu-bar auto-hide slides.
+//      position from positioningRect/anchor at show()-time only.
 //
 //   ⚠️  NEVER call show() without confirming button.bounds is non-zero
 //      first (see positioningRect(for:) below). A degenerate zero-size rect
@@ -55,10 +57,10 @@ public final class MBKPopoverController: NSObject {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var hostingController: NSHostingController<AnyView>!
-    private var sizeObservation: NSKeyValueObservation?
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var frameChangeObserver: NSObjectProtocol?
 
     // MARK: - Init
 
@@ -109,8 +111,6 @@ public final class MBKPopoverController: NSObject {
     private func openPopover() {
         guard let button = statusItem.button else { return }
 
-        // Pre-size to fittingSize before show() so AppKit places the window
-        // at the correct size immediately, avoiding a visible post-show jump.
         let fitting = hostingController.view.fittingSize
         if fitting.width > 0, fitting.height > 0 {
             popover.contentSize = fitting
@@ -126,8 +126,6 @@ public final class MBKPopoverController: NSObject {
 
     /// Returns a fresh positioningRect derived from the button's CURRENT
     /// bounds, or nil if those bounds are degenerate (zero width/height).
-    /// A zero-size rect must never be passed to show() — that silently
-    /// breaks AppKit's internal anchor machinery.
     private func positioningRect(for button: NSStatusBarButton) -> NSRect? {
         let bounds = button.bounds
         guard bounds.width > 0, bounds.height > 0 else {
@@ -146,10 +144,6 @@ public final class MBKPopoverController: NSObject {
 
     private func setupPopover() {
         hostingController = NSHostingController(rootView: rootView)
-        // MUST be []. Leaving this at the macOS default (.preferredContentSize)
-        // makes AppKit auto-write contentSize from the SwiftUI view's live
-        // intrinsic size on every layout pass — a second, competing write path
-        // that races our own applyContentSize() call below.
         hostingController.sizingOptions = []
         popover = NSPopover()
         popover.contentViewController = hostingController
@@ -162,10 +156,19 @@ public final class MBKPopoverController: NSObject {
 
     // MARK: - Size observer
 
+    /// Observes the hosting view's frame via NotificationCenter, NOT KVO.
+    /// See the CRITICAL GOTCHA note at the top of this file: NSView's `frame`
+    /// KVO is manual and gated behind postsFrameChangedNotifications, which
+    /// defaults to false. Without explicitly enabling it, `.observe(\.frame)`
+    /// silently never fires. This was the root cause of every prior failure.
     private func setupSizeObserver() {
-        sizeObservation = hostingController.view.observe(
-            \.frame, options: [.new]
-        ) { [weak self] _, _ in
+        let view = hostingController.view
+        view.postsFrameChangedNotifications = true
+        frameChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: view,
+            queue: nil
+        ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let settled = self.hostingController.view.fittingSize
@@ -261,6 +264,9 @@ public final class MBKPopoverController: NSObject {
     deinit {
         if let observer = workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        if let observer = frameChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
         }
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
