@@ -28,28 +28,32 @@
 //   Bug 1 (fixed previously): hostingView.autoresizingMask stretched the
 //   hosting view to match its parent, making it report a static size.
 //
-//   Bug 2 (this fix, the real root cause of "app is bricked, fixed
-//   size"): MenuBarKitExample's RootView wraps its content in its own
-//   GeometryReader to log size changes. A GeometryReader does not have
-//   an intrinsic size — it happily accepts whatever size AppKit proposes
-//   and reports that size back out. That means NSHostingView.fittingSize,
-//   which asks the hosted SwiftUI tree "what size do you want?", gets an
-//   answer that is just an echo of whatever frame the hosting view
-//   already has. There is no signal to react to — fittingSize can never
-//   diverge from the current frame when a GeometryReader sits in the
-//   tree, no matter how the CONTENT inside actually wants to be sized.
-//   This is not a workaround-able AppKit timing quirk; it's how
-//   GeometryReader's layout contract works, and it silently defeats any
-//   fittingSize-based approach.
+//   Bug 2 (fixed previously): MenuBarKitExample's RootView wraps its
+//   content in its own GeometryReader to log size changes. A
+//   GeometryReader does not have an intrinsic size — it happily accepts
+//   whatever size AppKit proposes and reports that size back out. That
+//   means NSHostingView.fittingSize, which asks the hosted SwiftUI tree
+//   "what size do you want?", gets an answer that is just an echo of
+//   whatever frame the hosting view already has.
 //
-//   FIX: stop asking AppKit to measure the SwiftUI tree at all. Instead,
-//   the root view wraps itself in .mbkReportSize(), a small modifier
-//   (see MBKSizeReporting.swift) that reads the view's ideal size via a
-//   PreferenceKey — the same mechanism SwiftUI itself uses internally
-//   for layout communication, and the only mechanism immune to a
-//   GeometryReader appearing anywhere below it. MBKPopoverController
-//   receives that size through an explicit callback
-//   (reportedSizeDidChange), not through polling the NSHostingView.
+//   FIX for both: stop asking AppKit to measure the SwiftUI tree at all.
+//   Instead, the root view wraps itself in .mbkReportSize(), a small
+//   modifier (see MBKSizeReporting.swift) that reads the view's ideal
+//   size via a PreferenceKey. MBKPopoverController receives that size
+//   through an explicit callback (reportedSizeDidChange).
+//
+// ZERO-SIZE POISONING — the "app doesn't show at all" bug:
+//   SwiftUI fires .mbkReportSize()'s preference change AT LEAST ONCE with
+//   PreferenceKey.defaultValue (CGSize.zero) before the hosting view has
+//   ever been laid out inside a real, sized window. reportedSizeDidChange
+//   MUST ignore size == .zero entirely, and specifically must not write
+//   it into lastReportedSize. Storing that zero flips lastReportedSize
+//   from nil to (0,0), which defeats the `lastReportedSize ??
+//   initialContentSize` fallback in openWindow() — the window opens at
+//   an actual zero size, is invisible, and (because a zero-size window
+//   trivially satisfies "nothing to show/interact with") looks like it
+//   immediately closes itself. Only ever accept sizes SwiftUI has
+//   measured for real, non-empty content.
 
 import AppKit
 import SwiftUI
@@ -243,10 +247,13 @@ public final class MBKPopoverController: NSObject {
     /// Called by the .mbkReportSize() modifier every time the wrapped
     /// SwiftUI content's ideal size changes, via PreferenceKey — NOT via
     /// NSHostingView.fittingSize, which is defeated by any GeometryReader
-    /// in the tree. See the SIZE SOURCE note at the top of this file.
+    /// in the tree. See the SIZE SOURCE and ZERO-SIZE POISONING notes at
+    /// the top of this file.
     private func reportedSizeDidChange(_ size: CGSize) {
-        lastReportedSize = size
+        // Guard BEFORE writing lastReportedSize — see ZERO-SIZE POISONING
+        // above. Do not store or act on the (0,0) default-value report.
         guard size.width > 0, size.height > 0 else { return }
+        lastReportedSize = size
         applyContentSize(size)
     }
 
