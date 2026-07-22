@@ -79,9 +79,13 @@
 //   ❌ Do NOT call show() again after contentSize writes — re-anchors and jumps.
 //
 //   On subsequent resize (e.g. navigating to a wider/taller view),
-//   applyContentSize writes the new contentSize and repositions the window
-//   using the WINDOW width (content + chrome), not content width.
-//   See ARROW CENTERING — reposition in applyContentSize below.
+//   applyContentSize writes the new contentSize and ALWAYS calls setFrameOrigin
+//   to reposition using the WINDOW width (content + chrome), not content width.
+//
+//   ❌ Do NOT guard setFrameOrigin with abs(currentX - clampedX) > 1.
+//   When width grows AppKit expands to the right (origin.x unchanged) so
+//   the guard silently passes while the window is still off-center.
+//   setFrameOrigin is idempotent; always call it.
 //
 // SIZE OBSERVATION — why observe view.frame and read fittingSize:
 //   preferredContentSize on NSHostingController is only recomputed when
@@ -271,9 +275,10 @@ public final class MBKPopoverController: NSObject {
     /// Writes a new contentSize to the popover, then repositions the popover
     /// window so the arrow stays centered under the status-bar button.
     ///
-    /// Uses popoverWindow.frame.width (full window width including chrome) after
-    /// the contentSize write — NOT preferred.width (content only).
-    /// See ARROW CENTERING in file header.
+    /// Always calls setFrameOrigin after a contentSize write — never guarded
+    /// by a delta check. When width grows AppKit expands to the right keeping
+    /// origin.x fixed, so a delta check would silently pass while the window
+    /// is still off-center. See ARROW CENTERING in file header.
     ///
     /// Skipped entirely when the auto-hide menubar is hidden.
     /// See SIDE-JUMP in file header.
@@ -315,11 +320,12 @@ public final class MBKPopoverController: NSObject {
                + "delta=(\(preferred.width - currentSize.width),\(preferred.height - currentSize.height))")
         popover.contentSize = preferred
 
-        // Reposition window so arrow stays centered under the button.
-        // Use popoverWindow.frame.width (window including chrome), NOT preferred.width.
-        // button.frame.midX is in button-window coords; add buttonWin.frame.minX
-        // to get the screen x coordinate.
-        // ❌ Do NOT use preferred.width / 2 — see ARROW CENTERING in file header.
+        // Always reposition after every contentSize write.
+        // ❌ Do NOT guard with abs(currentX - clampedX) > 1 — when width grows,
+        // AppKit expands right (origin.x unchanged) so the guard passes silently
+        // while the window is still off-center.
+        // Use popoverWindow.frame.width (window + chrome), NOT preferred.width.
+        // button.frame.midX is button-window local; add buttonWin.frame.minX for screen x.
         if let popoverWindow = popover.contentViewController?.view.window,
            let screen = buttonWin.screen {
             let windowWidth = popoverWindow.frame.width
@@ -327,13 +333,10 @@ public final class MBKPopoverController: NSObject {
             let idealX = buttonMidX - windowWidth / 2
             let clampedX = max(screen.visibleFrame.minX,
                                min(idealX, screen.visibleFrame.maxX - windowWidth))
-            let currentX = popoverWindow.frame.origin.x
-            if abs(currentX - clampedX) > 1 {
-                mbkLog("PopoverController",
-                       "applyContentSize — reposition x \(currentX) → \(clampedX) "
-                       + "(buttonMidX=\(buttonMidX) windowWidth=\(windowWidth))")
-                popoverWindow.setFrameOrigin(NSPoint(x: clampedX, y: popoverWindow.frame.origin.y))
-            }
+            mbkLog("PopoverController",
+                   "applyContentSize — reposition x \(popoverWindow.frame.origin.x) → \(clampedX) "
+                   + "(buttonMidX=\(buttonMidX) windowWidth=\(windowWidth))")
+            popoverWindow.setFrameOrigin(NSPoint(x: clampedX, y: popoverWindow.frame.origin.y))
         }
         mbkLog("PopoverController", "applyContentSize — done")
     }
