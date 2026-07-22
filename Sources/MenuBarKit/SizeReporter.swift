@@ -14,15 +14,15 @@
 //   )
 
 import Combine
+import Observation
 import SwiftUI
 
 // MARK: - Relay
 
-/// Observable relay that carries content-size updates from SwiftUI into
-/// `MBKPopoverController`. Create one instance, inject via `.environment()`,
-/// and pass it to the controller.
-@MainActor
-public final class MBKSizeRelay: ObservableObject {
+/// Carries content-size updates from SwiftUI into `MBKPopoverController`.
+/// Create one instance, inject via `.environment()`, and pass to the controller.
+@Observable
+public final class MBKSizeRelay {
     public let subject = PassthroughSubject<NSSize, Never>()
     public init() {}
 }
