@@ -16,11 +16,13 @@
 //     preventing the outside-click monitor and workspace observer from
 //     closing the popover while the alert is on screen.
 //
-// WIDTH: deliberately much wider than MainView (640pt vs. Main's ~260pt).
-// This is intentional test scaffolding, not a design choice — a large
-// width delta between routes makes any arrow-centering or window-frame
-// discrepancy in MBKPopoverController's resize path immediately obvious
-// (a small drift is easy to miss at 320pt, impossible to miss at 640pt).
+// WIDTH (TEST BRANCH test/intrinsic-content-size-kvo): the fixed
+// `.frame(width: 640)` from the working branch has been REMOVED here on
+// purpose. This view's width is now determined entirely by its own
+// content — specifically the long, unwrapped diagnostic string below —
+// via NSHostingView.intrinsicContentSize. If content-driven sizing is
+// truly working, this view should end up noticeably wider than
+// MainView's ~260pt without anyone declaring a number anywhere.
 import MenuBarKit
 import SwiftUI
 
@@ -29,7 +31,7 @@ struct SettingsView: View {
     /// App state injected from the environment.
     @Environment(AppState.self) private var appState
     /// Overlay gate injected from the environment.
-    // TODO(#2): remove overlayGate once MBK modifiers resolve it from @Environment internally.
+    // TODO(#2): remove overlayGate once MBK resolves gate via @Environment internally.
     @Environment(MBKOverlayGate.self) private var overlayGate
     /// Controls whether the anchored sheet is presented.
     @State private var showSheet = false
@@ -40,6 +42,17 @@ struct SettingsView: View {
         VStack(spacing: 12) {
             Text("Settings").font(.headline)
             Divider()
+
+            // Intentionally wide, unwrapped content so this view's ideal
+            // width is genuinely larger than MainView's, with no manual
+            // .frame(width:) anywhere forcing it — the point of this test
+            // branch. lineLimit(1) + fixedSize() forces SwiftUI to size
+            // this Text at its full single-line width rather than wrapping
+            // it to whatever width a parent might otherwise propose.
+            Text("Diagnostic path: /Users/eon/Library/Application Support/MenuBarKitExample/config/settings.snapshot.json")
+                .font(.system(size: 11, design: .monospaced))
+                .lineLimit(1)
+                .fixedSize()
 
             // Scenario 1
             // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
@@ -84,7 +97,7 @@ struct SettingsView: View {
             Button("← Back") { appState.route = .main }
         }
         .padding(16)
-        .frame(width: 640)
+        .fixedSize()
         .onAppear    { print("[SettingsView] onAppear") }
         .onDisappear { print("[SettingsView] onDisappear") }
     }
