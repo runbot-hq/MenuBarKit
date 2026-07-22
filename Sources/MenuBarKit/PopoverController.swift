@@ -1,5 +1,25 @@
 // PopoverController.swift
 // MenuBarKit
+//
+// NUCLEAR OPTION: NSPopover is gone. After three consecutive attempts to
+// eliminate a visible side-jump on resize (setFrameOrigin correction,
+// positioningRect reassignment, close+reshow with NSDisableScreenUpdates,
+// close+reshow with NSAnimationContext) all failed or introduced a new
+// side-jump, the conclusion is that NSPopover's internal arrow/frame
+// layout is a black box we cannot fully synchronize with our own resize
+// timing — every fix could only ever mask one specific interaction with
+// AppKit's private relayout, never the underlying window-server race.
+//
+// This file now backs MBKPopoverController with a plain custom NSPanel
+// that we fully own:
+//   - We set the window's frame directly, in one call, every time.
+//   - We draw our own arrow (MBKArrowView) at an x-position we compute
+//     ourselves from the button's screen frame — no positioningRect, no
+//     NSPopover-internal recomputation, nothing hidden.
+//   - Resize is a single setFrame(_:display:) call. There is no
+//     close+reshow cycle, so there is no possible intermediate frame for
+//     the window server to flush.
+// This removes the entire class of bug rather than patching around it.
 
 import AppKit
 import SwiftUI
@@ -12,18 +32,21 @@ public final class MBKPopoverController: NSObject {
     private let overlayGate: MBKOverlayGate
     private let rootView: AnyView
     private let symbolName: String
-    private let contentSize: NSSize
+    private let initialContentSize: NSSize
 
     // MARK: - Owned objects
 
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
-    private var hostingController: NSHostingController<AnyView>!
+    private var window: NSWindow!
+    private var arrowView: MBKArrowView!
+    private var hostingView: NSHostingView<AnyView>!
     private var sizeObservation: NSKeyValueObservation?
     private var isSetUp = false
-    private var isReanchoring = false
+    private var isShown = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
+
+    private let arrowHeight: CGFloat = 10
 
     // MARK: - Init
 
@@ -36,7 +59,7 @@ public final class MBKPopoverController: NSObject {
         self.rootView = AnyView(rootView)
         self.overlayGate = overlayGate
         self.symbolName = symbolName
-        self.contentSize = contentSize
+        self.initialContentSize = contentSize
     }
 
     // MARK: - Setup
@@ -46,7 +69,7 @@ public final class MBKPopoverController: NSObject {
         isSetUp = true
         NSApp.setActivationPolicy(.accessory)
         setupStatusItem()
-        setupPopover()
+        setupWindow()
         setupWorkspaceObserver()
         mbkLog("PopoverController", "setup complete")
     }
@@ -64,156 +87,158 @@ public final class MBKPopoverController: NSObject {
     }
 
     @objc private func togglePopover() {
-        if popover.isShown {
-            popover.performClose(nil)
+        if isShown {
+            closeWindow()
         } else {
-            openPopover()
+            openWindow()
         }
     }
 
-    private func openPopover() {
+    // MARK: - Window setup
+
+    private func setupWindow() {
+        hostingView = NSHostingView(rootView: rootView)
+        arrowView = MBKArrowView()
+
+        // Use NSPanel with .nonactivatingPanel styleMask, NOT plain
+        // .borderless NSWindow. AnchoredSheet.swift locates "the popover
+        // window" by searching NSApp.windows for
+        // styleMask.contains(.nonactivatingPanel) — that discriminator
+        // must keep matching this window or sheet-anchoring (mbkSheet)
+        // breaks silently for every consumer of this package.
+        let win = NSPanel(
+            contentRect: NSRect(origin: .zero, size: initialContentSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        win.isReleasedWhenClosed = false
+        win.level = .popUpMenu
+        win.hasShadow = true
+        win.isOpaque = false
+        win.backgroundColor = .clear
+        win.collectionBehavior = [.transient, .ignoresCycle]
+        win.hidesOnDeactivate = false
+        win.becomesKeyOnlyIfNeeded = true
+
+        arrowView.frame = NSRect(origin: .zero, size: win.frame.size)
+        arrowView.autoresizingMask = [.width, .height]
+        win.contentView = arrowView
+
+        hostingView.frame = arrowView.bodyRect
+        hostingView.autoresizingMask = [.width, .height]
+        arrowView.addSubview(hostingView)
+
+        window = win
+        setupSizeObserver()
+    }
+
+    // MARK: - Frame computation
+
+    /// Computes the window frame + arrow x so that the arrow always points
+    /// at the status item button's horizontal center, for a given content
+    /// size. This is the ONLY place window geometry is calculated — one
+    /// function, one call site per open/resize, no AppKit black box.
+    private func computeFrame(for contentSize: NSSize) -> (frame: NSRect, arrowX: CGFloat)? {
+        guard let button = statusItem.button, let buttonWindow = button.window else { return nil }
+        let buttonScreenFrame = buttonWindow.convertToScreen(button.frame)
+        let buttonMidX = buttonScreenFrame.midX
+
+        let totalHeight = contentSize.height + arrowHeight
+        let totalWidth = contentSize.width
+
+        var originX = buttonMidX - totalWidth / 2
+        let originY = buttonScreenFrame.minY - totalHeight
+
+        guard let screen = buttonWindow.screen ?? NSScreen.main else { return nil }
+        let minX = screen.visibleFrame.minX + 4
+        let maxX = screen.visibleFrame.maxX - totalWidth - 4
+        originX = min(max(originX, minX), maxX)
+
+        let frame = NSRect(x: originX, y: originY, width: totalWidth, height: totalHeight)
+        let arrowX = buttonMidX - originX
+        return (frame, arrowX)
+    }
+
+    // MARK: - Open / close
+
+    private func openWindow() {
         guard let button = statusItem.button else { return }
+        let fitting = hostingView.fittingSize
+        let size = (fitting.width > 0 && fitting.height > 0) ? fitting : initialContentSize
 
-        // Pre-size to fittingSize so AppKit places the window at the correct
-        // width and computes the arrow at the correct offset immediately on
-        // show().
-        let fitting = hostingController.view.fittingSize
-        if fitting.width > 0, fitting.height > 0 {
-            popover.contentSize = fitting
-            mbkLog("PopoverController", "openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
-        }
+        guard let (frame, arrowX) = computeFrame(for: size) else { return }
 
-        let midX = button.bounds.midX
-        let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
-                                width: 1, height: button.bounds.height)
-        popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
+        arrowView.frame = NSRect(origin: .zero, size: frame.size)
+        hostingView.frame = arrowView.bodyRect
+        arrowView.arrowXInWindow = arrowX
+
+        window.setFrame(frame, display: true)
+        window.orderFrontRegardless()
+        button.isHighlighted = true
+
+        isShown = true
         NSApp.activate(ignoringOtherApps: true)
-        mbkLog("PopoverController", "popover shown")
+        mbkLog("PopoverController", "openWindow — sized to (\(size.width),\(size.height))")
         startEventMonitor()
     }
 
-    private func setButtonHighlight(_ on: Bool) {
-        statusItem.button?.isHighlighted = on
-    }
-
-    // MARK: - Popover setup
-
-    private func setupPopover() {
-        hostingController = NSHostingController(rootView: rootView)
-        popover = NSPopover()
-        popover.contentViewController = hostingController
-        popover.contentSize = contentSize
-        popover.animates = false
-        popover.behavior = .applicationDefined
-        popover.delegate = self
-        setupSizeObserver()
+    private func closeWindow() {
+        guard isShown else { return }
+        window.orderOut(nil)
+        statusItem.button?.isHighlighted = false
+        isShown = false
+        stopEventMonitor()
+        overlayGate.hasActiveOverlay = false
+        mbkLog("PopoverController", "windowDidClose")
+        mbkLog("PopoverController", "overlay gate reset on close")
     }
 
     // MARK: - Size observer
 
     private func setupSizeObserver() {
-        sizeObservation = hostingController.view.observe(
-            \.frame, options: [.new]
-        ) { [weak self] _, _ in
+        sizeObservation = hostingView.observe(\.frame, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let settled = self.hostingController.view.fittingSize
-                self.applyContentSize(settled)
+                self.applyContentSize(self.hostingView.fittingSize)
             }
         }
     }
 
-    /// Re-anchors the popover at the new content size by closing FIRST,
-    /// writing contentSize while hidden, then reshowing (animation
-    /// disabled), rather than mutating contentSize/frame on the
-    /// already-shown window.
-    ///
-    /// WHY NEITHER IN-PLACE APPROACH WORKS:
-    ///   - Manually calling setFrameOrigin() after writing contentSize moves
-    ///     the *window*, but the arrow's internal offset (distance from the
-    ///     window's left edge to the arrow tip) is computed once, during the
-    ///     original show() layout pass, and is never recalculated afterward.
-    ///     The window ends up centered on the button, but the arrow tip
-    ///     stays at whatever offset AppKit computed for the FIRST width —
-    ///     producing visible drift whenever a later width differs from the
-    ///     first one shown.
-    ///   - Re-assigning positioningRect on an already-shown popover does
-    ///     force AppKit to recompute the arrow correctly, but it does so via
-    ///     an async re-layout that visibly SNAPS the window to its new
-    ///     position (a well-known AppKit quirk) — trading arrow drift for an
-    ///     equally visible side-jump.
-    ///
-    /// WHY CLOSE + RESHOW WORKS:
-    ///   show(relativeTo:of:preferredEdge:) always performs a full, fresh
-    ///   AppKit layout pass — window frame and arrow tip are computed
-    ///   together from positioningRect and contentSize, exactly as on first
-    ///   open. Since popover.animates = false, close+reshow is visually
-    ///   instantaneous (no flicker), and this guarantees the window and
-    ///   arrow are always consistent, regardless of how the width changes
-    ///   between views.
+    /// Resizes and re-centers the window on the button in a SINGLE
+    /// setFrame(_:display:) call. There is no close/reshow, no
+    /// contentSize/positioningRect indirection, and therefore no
+    /// intermediate frame the window server could ever flush separately.
+    /// Arrow position is written directly to arrowView.arrowXInWindow —
+    /// no AppKit-internal arrow recomputation exists to race against.
     private func applyContentSize(_ preferred: NSSize) {
-        guard popover.isShown else { return }
+        guard isShown else { return }
         guard preferred.width > 0, preferred.height > 0 else { return }
-        let currentSize = popover.contentSize
-        guard let button = statusItem.button,
-              let buttonWin = button.window else {
-            mbkLog("PopoverController", "applyContentSize — no button/window, skipping")
+        guard let buttonWin = statusItem.button?.window else {
+            mbkLog("PopoverController", "applyContentSize — no button window, skipping")
             return
         }
-        // Skip only when the status item's button is genuinely off-screen
-        // (e.g. auto-hidden menu bar).
         if let screen = buttonWin.screen, !screen.frame.contains(buttonWin.frame.origin) {
             mbkLog("PopoverController", "applyContentSize — button off-screen, skipping")
             return
         }
+
+        let currentSize = NSSize(width: window.frame.width, height: window.frame.height - arrowHeight)
         guard abs(currentSize.width - preferred.width) > 1
                 || abs(currentSize.height - preferred.height) > 1 else { return }
 
-        // Don't close/reshow while an overlay (sheet/alert) is active —
-        // performClose() would tear down the overlay-gate state and any
-        // anchored child window relationships. In that case just resize in
-        // place; the arrow may be briefly off until the next resize after
-        // the overlay clears.
-        guard !overlayGate.hasActiveOverlay else {
-            mbkLog("PopoverController", "applyContentSize — overlay active, resizing in place only")
-            popover.contentSize = preferred
-            return
-        }
+        guard let (frame, arrowX) = computeFrame(for: preferred) else { return }
 
-        // Close, resize, and reshow, wrapped in an NSAnimationContext group
-        // with duration 0 and implicit animation disabled, rather than
-        // NSDisableScreenUpdates()/NSEnableScreenUpdates(). The legacy
-        // screen-lock functions are deprecated because they only suppress
-        // updates for the classic (non-layer-backed) window-server path —
-        // on modern layer-backed windows (which NSHostingController's view
-        // is), Core Animation can still commit and flush an intermediate
-        // "closed" frame independently, which is exactly what showed up as
-        // a side-jump even with the legacy calls in place.
-        // NSAnimationContext.runAnimationGroup batches all AppKit/CA work
-        // performed inside the closure into a single CATransaction commit,
-        // so the closed-window frame and the reshown-window frame are
-        // coalesced into one atomic screen update — only the final,
-        // correctly anchored frame ever reaches the display. Suppress the
-        // delegate's side effects (highlight/eventMonitor/overlayGate
-        // reset) since this isn't a user-driven dismiss.
-        isReanchoring = true
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0
-            context.allowsImplicitAnimation = false
-            popover.performClose(nil)
+        mbkLog("PopoverController",
+               "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
+               + "prev=(\(currentSize.width),\(currentSize.height))")
 
-            mbkLog("PopoverController",
-                   "applyContentSize — writing (\(preferred.width),\(preferred.height)) "
-                   + "prev=(\(currentSize.width),\(currentSize.height)) while closed")
-            popover.contentSize = preferred
+        arrowView.frame = NSRect(origin: .zero, size: frame.size)
+        hostingView.frame = arrowView.bodyRect
+        arrowView.arrowXInWindow = arrowX
+        window.setFrame(frame, display: true)
 
-            let midX = button.bounds.midX
-            let centerRect = NSRect(x: midX - 0.5, y: button.bounds.minY,
-                                    width: 1, height: button.bounds.height)
-            popover.show(relativeTo: centerRect, of: button, preferredEdge: .minY)
-        }
-        isReanchoring = false
-        mbkLog("PopoverController", "applyContentSize — re-shown at new size, arrow re-centered")
+        mbkLog("PopoverController", "applyContentSize — resized in place, arrow re-centered, no close/reshow")
     }
 
     // MARK: - Workspace observer
@@ -227,17 +252,17 @@ public final class MBKPopoverController: NSObject {
             let activated = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
                 as? NSRunningApplication
             Task { @MainActor [weak self] in
-                guard let self, self.popover.isShown else { return }
+                guard let self, self.isShown else { return }
                 guard activated != NSRunningApplication.current else {
                     mbkLog("PopoverController", "workspace observer — self-activation, ignoring")
                     return
                 }
                 guard !overlayGate.hasActiveOverlay else {
-                    mbkLog("PopoverController", "workspace observer — overlay active, keeping popover open")
+                    mbkLog("PopoverController", "workspace observer — overlay active, keeping window open")
                     return
                 }
                 mbkLog("PopoverController", "workspace observer — other app active, closing")
-                self.popover.performClose(nil)
+                self.closeWindow()
             }
         }
     }
@@ -250,7 +275,8 @@ public final class MBKPopoverController: NSObject {
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.popover.performClose(nil)
+                guard let self, !self.overlayGate.hasActiveOverlay else { return }
+                self.closeWindow()
             }
         }
         mbkLog("PopoverController", "event monitor started")
@@ -270,32 +296,5 @@ public final class MBKPopoverController: NSObject {
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
         }
-    }
-}
-
-// MARK: - NSPopoverDelegate
-
-extension MBKPopoverController: NSPopoverDelegate {
-    public func popoverWillShow(_ notification: Notification) {
-        guard !isReanchoring else { return }
-        setButtonHighlight(true)
-    }
-
-    public func popoverShouldClose(_ popover: NSPopover) -> Bool {
-        let block = overlayGate.hasActiveOverlay
-        mbkLog("PopoverController", "popoverShouldClose blocked=\(block)")
-        return !block
-    }
-
-    public func popoverDidClose(_ notification: Notification) {
-        guard !isReanchoring else {
-            mbkLog("PopoverController", "popoverDidClose — internal re-anchor close, skipping teardown")
-            return
-        }
-        mbkLog("PopoverController", "popoverDidClose")
-        setButtonHighlight(false)
-        stopEventMonitor()
-        overlayGate.hasActiveOverlay = false
-        mbkLog("PopoverController", "overlay gate reset on close")
     }
 }
