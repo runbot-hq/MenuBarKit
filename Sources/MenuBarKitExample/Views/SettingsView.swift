@@ -1,84 +1,125 @@
 // SettingsView.swift
 // MenuBarKitExample
 //
-// Exercises all three scenarios:
+// Exercises all scenarios:
+//   1 — Sheet anchors + blocks outside-click dismiss
+//   2 — File picker from popover level
+//   3 — Alert from popover level
+//   4 — Async scroll list (mimic run-bot SettingsView with runner list)
 //
-//   Scenario 1 — Sheet anchors + blocks outside-click dismiss:
-//     "Open sheet" presents via .mbkSheet(), which wires the SwiftUI sheet
-//     window as a child of the popover window and gates dismiss.
-//
-//   Scenario 2 — File picker from popover level:
-//     "Pick folder (popover)" calls mbkOpenFilePicker(target: .popover).
-//
-//   Scenario 3 — Alert from popover level:
-//     "Show alert" sets AppState.showAlert = true.
-//     .mbkAlert wraps .alert() and manages the overlay gate automatically,
-//     preventing the outside-click monitor and workspace observer from
-//     closing the popover while the alert is on screen.
+// WIDTH CONTRACT (matches PanelMainView):
+//   .frame(width: 320).fixedSize(horizontal: true, vertical: false)
+//   Width is fixed; ScrollView drives height.
 
 import MenuBarKit
 import SwiftUI
 
-/// Settings view that exercises the sheet-anchoring, file-picker, and alert scenarios.
 struct SettingsView: View {
-    /// App state injected from the environment.
     @Environment(AppState.self) private var appState
-    /// Overlay gate injected from the environment.
-    // TODO(#2): remove overlayGate once MBK modifiers resolve it from @Environment internally.
     @Environment(MBKOverlayGate.self) private var overlayGate
-    /// Controls whether the anchored sheet is presented.
     @State private var showSheet = false
 
-    /// The root view hierarchy for the settings screen.
+    private var scrollMaxHeight: CGFloat {
+        (NSScreen.main?.visibleFrame.height ?? 800) * 0.80
+    }
+
     var body: some View {
         @Bindable var appState = appState
-        VStack(spacing: 12) {
-            Text("Settings").font(.headline)
-            Divider()
-
-            // Scenario 1
-            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
-            Button("Open sheet") { showSheet = true }
-                .mbkSheet(isPresented: $showSheet, overlayGate: overlayGate) {
-                    SheetView()
-                        .environment(appState)
-                        .environment(overlayGate)
-                }
-
-            // Scenario 2
-            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
-            Button("Pick folder (popover)") {
-                mbkOpenFilePicker(target: .popover, overlayGate: overlayGate) { url in
-                    appState.pickedURL = url
-                }
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                Text("Settings").font(.headline)
+                Spacer()
             }
-            if let path = appState.pickedURL?.path {
-                Text(path)
-                    .font(.system(size: 11, design: .monospaced))
-                    .lineLimit(1).truncationMode(.middle)
-            }
-
-            // Scenario 3
-            // TODO(#2): overlayGate: parameter removed when MBK resolves gate via @Environment.
-            GroupBox("Alert from popover") {
-                Button("Show alert") { appState.showAlert = true }
-                Text("Alert should appear. Popover stays alive.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            .mbkAlert(
-                "Simulated Error",
-                isPresented: $appState.showAlert,
-                overlayGate: overlayGate
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text("This is a test error alert shown from the popover view.")
-            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
 
             Divider()
-            Button("← Back") { appState.route = .main }
+
+            // Async-loaded runner list — mirrors run-bot's local runner rows
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if appState.settingsItems.isEmpty {
+                        Text("Loading runners…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                    } else {
+                        ForEach(appState.settingsItems, id: \.self) { item in
+                            HStack {
+                                Image(systemName: "server.rack")
+                                    .foregroundStyle(.blue)
+                                Text(item)
+                                    .font(.caption)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            Divider().padding(.leading, 12)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .frame(maxHeight: scrollMaxHeight)
+
+            Divider()
+
+            // Controls section
+            VStack(alignment: .leading, spacing: 8) {
+                // Scenario 1
+                Button("Open sheet") { showSheet = true }
+                    .mbkSheet(isPresented: $showSheet, overlayGate: overlayGate) {
+                        SheetView()
+                    }
+
+                // Scenario 2
+                Button("Pick folder (popover)") {
+                    mbkOpenFilePicker(target: .popover, overlayGate: overlayGate) { url in
+                        appState.pickedURL = url
+                    }
+                }
+                if let url = appState.pickedURL {
+                    Text(url.lastPathComponent).font(.caption).foregroundStyle(.secondary)
+                }
+
+                // Scenario 3
+                GroupBox("Alert from popover") {
+                    Button("Show alert") { appState.showAlert = true }
+                    Text("Alert should appear. Popover stays alive.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .mbkAlert(
+                    isPresented: $appState.showAlert,
+                    overlayGate: overlayGate,
+                    title: "Test Alert",
+                    message: "Popover must stay open.",
+                    primaryButton: .default(Text("OK")) { appState.showAlert = false },
+                    secondaryButton: .cancel { appState.showAlert = false }
+                )
+
+                Button("← Back") { appState.route = .main }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
-        .padding(16)
-        .frame(width: 260)
+        .frame(width: 320)
+        .fixedSize(horizontal: true, vertical: false)
+        .onAppear {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(800))
+                appState.settingsItems = [
+                    "runner-mac-01 (idle)",
+                    "runner-mac-02 (busy)",
+                    "runner-linux-01 (idle)",
+                    "runner-linux-02 (idle)",
+                    "runner-linux-03 (busy)",
+                ]
+            }
+        }
+        .onDisappear {
+            appState.settingsItems = []
+        }
     }
 }
