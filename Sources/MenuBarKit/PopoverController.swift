@@ -49,10 +49,10 @@
 //
 //   1. Outer — NSVisualEffectView (clipView)
 //      Set as panel.contentView. Its ONLY job is maskImage corner clipping.
-//      maskImage is applied by the window server compositor, not Core Animation,
-//      so it survives addChildWindow() when a sheet opens. Nothing else does.
-//      material = .windowBackground so it contributes no visible material of
-//      its own — NSGlassEffectView below provides all the visible chrome.
+//      material = .clear so the VEV contributes ZERO compositor content —
+//      glass refracts straight through to the desktop. Any other material
+//      (e.g. .windowBackground) renders its own dark vibrancy layer that
+//      the glass composites on top of, killing the live glass look.
 //
 //   2. Inner — NSGlassEffectView
 //      Pinned to fill clipView. Provides the Tahoe liquid-glass material.
@@ -67,8 +67,7 @@
 //   5. NSPanel subclass overriding addChildWindow()     → AppKit resets again async after super
 //   6. DispatchQueue.main.async re-assertion            → still a race, still regresses
 //   7. NSVisualEffectView.maskImage wrapping NSGlassEffectView — WORKS. (current approach)
-//   8. maskImage on NSGlassEffectView directly          → COMPILE ERROR: NSGlassEffectView
-//      does NOT inherit NSVisualEffectView and has no maskImage property.
+//   8. maskImage on NSGlassEffectView directly          → COMPILE ERROR: no maskImage property
 //
 // CORNER RADIUS VALUE:
 //   20pt matches system status-bar panels (Weather, etc.) on macOS 26.
@@ -252,19 +251,23 @@ public final class MBKPopoverController: NSObject {
         //
         // clipView is an NSVisualEffectView whose ONLY role is to hold maskImage.
         // maskImage is the sole clipping technique that survives addChildWindow()
-        // when a sheet is presented. Every other approach was tried and failed —
-        // see ROUNDED CORNERS — HISTORY in the file header.
+        // when a sheet is presented. See ROUNDED CORNERS — HISTORY in the file header.
+        //
+        // material = .clear is REQUIRED — any other material renders its own
+        // vibrancy/blur content that the glass composites on top of, making the
+        // panel look grey/dark instead of live liquid glass.
         //
         // Rules:
         //   • clipView MUST be panel.contentView — do not add any wrapper above it.
         //   • clipView.maskImage MUST be set to roundedMaskImage() — do not remove it.
+        //   • clipView.material MUST stay .clear — do not change it.
         //   • Do NOT set cornerRadius, masksToBounds, or wantsLayer=false on clipView.
         //   • Do NOT replace clipView with any other view type.
         //   • Do NOT make NSGlassEffectView the direct panel.contentView.
         //   • NSGlassEffectView has NO maskImage property — do not attempt to set one.
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         let clipView = NSVisualEffectView()
-        clipView.material = .windowBackground
+        clipView.material = .clear          // ← MUST be .clear — see above
         clipView.blendingMode = .behindWindow
         clipView.state = .active
         clipView.wantsLayer = true
@@ -295,13 +298,13 @@ public final class MBKPopoverController: NSObject {
         mbkLog("PopoverController", "setupPanel — initialSize=(\(initialSize.width),\(initialSize.height))")
     }
 
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     // !! DO NOT TOUCH — roundedMaskImage() !!                               !!
     //
     // Produces the maskImage that keeps corners rounded through addChildWindow().
     // capInsets + .stretch let it scale to any panel size without regenerating.
     // Do not change the drawing, capInsets, or resizingMode.
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     private func roundedMaskImage(radius: CGFloat) -> NSImage {
         let size = NSSize(width: radius * 2 + 1, height: radius * 2 + 1)
         let image = NSImage(size: size, flipped: false) { rect in
