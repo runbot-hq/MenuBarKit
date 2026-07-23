@@ -1,18 +1,15 @@
 // MainView.swift
 // MenuBarKitExample
 //
-// Shows a pre-populated list immediately on open.
-// Width=260, Settings=320 — the width difference exercises arrow centering.
+// Uses a plain VStack (no ScrollView) so fittingSize reports correct full
+// height before the view is attached to a window.
+// Width=260 vs Settings width=320 exercises arrow centering on nav.
 
 import AppKit
 import SwiftUI
 
 struct MainView: View {
     @Environment(AppState.self) private var appState
-
-    private var scrollMaxHeight: CGFloat {
-        (NSScreen.main?.visibleFrame.height ?? 800) * 0.80
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -28,22 +25,16 @@ struct MainView: View {
 
             Divider()
 
-            ScrollView(.vertical, showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(appState.mainItems, id: \.self) { item in
-                        HStack {
-                            Image(systemName: "checkmark.circle").foregroundStyle(.green)
-                            Text(item).font(.caption)
-                            Spacer()
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        Divider().padding(.leading, 12)
-                    }
+            ForEach(appState.mainItems, id: \.self) { item in
+                HStack {
+                    Image(systemName: "checkmark.circle").foregroundStyle(.green)
+                    Text(item).font(.caption)
+                    Spacer()
                 }
-                .padding(.vertical, 4)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                Divider().padding(.leading, 12)
             }
-            .frame(maxHeight: scrollMaxHeight)
         }
         .frame(width: 260)
         .fixedSize(horizontal: true, vertical: false)
