@@ -21,10 +21,10 @@
 //
 // NOTIFICATION CLOSURE ISOLATION:
 //   NotificationCenter delivers callbacks on a Sendable (nonisolated) closure.
-//   Accessing @MainActor-isolated state (NSWindow.styleMask, MBKSheetAnchorTask.finish)
-//   requires hopping back to the main actor via Task { @MainActor in }.
-//   The hop is safe: the notification is always posted on the main queue (.main),
-//   so the Task body runs almost immediately with no observable latency.
+//   Notification itself is not Sendable, so it cannot be captured into a
+//   Task { @MainActor in } body. Fix: extract notification.object (AnyObject?,
+//   which is Sendable) before the hop, then cast to NSWindow inside the task.
+//   NSWindow.styleMask and finish() are accessed safely on the main actor.
 //
 // CANCELLATION PATH:
 //   If the sheet binding flips back to false before the window becomes key,
@@ -78,20 +78,21 @@ final class MBKSheetAnchorTask {
             guard let self else { return }
             let window = await withCheckedContinuation { (cont: CheckedContinuation<NSWindow?, Never>) in
                 self.continuation = cont
-                // Capture only the identity of popoverWindow so the Sendable
-                // closure does not close over any @MainActor state.
+                // Capture popoverWindow by value so the Sendable closure
+                // does not close over any @MainActor-isolated state.
                 let popoverWindow = self.popoverWindow
                 self.observer = NotificationCenter.default.addObserver(
                     forName: NSWindow.didBecomeKeyNotification,
                     object: nil,
                     queue: .main
                 ) { [weak self] notification in
-                    // NotificationCenter delivers on a Sendable closure.
-                    // Hop to @MainActor to access NSWindow.styleMask and finish().
+                    // Notification is not Sendable — extract .object (AnyObject?,
+                    // which is Sendable) before hopping to @MainActor.
+                    let object = notification.object
                     Task { @MainActor [weak self] in
                         guard
                             let self,
-                            let window = notification.object as? NSWindow,
+                            let window = object as? NSWindow,
                             window !== popoverWindow,
                             window.styleMask.contains(.borderless)
                         else { return }
