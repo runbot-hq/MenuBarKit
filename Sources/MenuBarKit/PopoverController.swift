@@ -46,9 +46,10 @@
 //      contentSize is 600. window.frame.height reflects the true rendered
 //      height. Using popover.contentSize.height as the delta reference
 //      therefore produces a wrong dh, shifting origin.y by the overflow.
-//      FIX: measure chromeHeight once in popoverWillShow (before any clamp
-//      overflow), then derive actualCurrentH = window.frame.height - chrome
-//      for all subsequent delta calculations.
+//      FIX: measure chromeHeight once in popoverWillShow using
+//      pendingChromeContentSize — the exact value we set contentSize to
+//      in openPopover() — NOT popover.contentSize, which may be stale
+//      from a prior session where overflow occurred.
 
 import AppKit
 import SwiftUI
@@ -75,6 +76,13 @@ public final class MBKPopoverController: NSObject {
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
+
+    /// The contentSize we passed to popover immediately before calling show().
+    /// Set in openPopover(), consumed once in popoverWillShow() to compute chromeHeight.
+    /// Using this — rather than reading popover.contentSize in popoverWillShow — avoids
+    /// a stale-value bug where a prior session's overflow leaves contentSize != actual
+    /// rendered height, corrupting the chrome measurement.
+    private var pendingChromeContentSize: CGSize?
 
     /// Constant offset between window.frame.height and popover.contentSize.height
     /// (AppKit chrome: shadow + border). Measured once in popoverWillShow before
@@ -140,7 +148,11 @@ public final class MBKPopoverController: NSObject {
 
         let fitting = hostingController.view.fittingSize
         if fitting.width > 0, fitting.height > 0 {
-            popover.contentSize = clamp(fitting)
+            let clamped = clamp(fitting)
+            popover.contentSize = clamped
+            // Store for chrome measurement in popoverWillShow — must be the value
+            // we actually set, not read back from popover.contentSize later.
+            pendingChromeContentSize = clamped
             mbkLog("PopoverController", "openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
         }
 
@@ -311,10 +323,13 @@ public final class MBKPopoverController: NSObject {
 extension MBKPopoverController: NSPopoverDelegate {
     public func popoverWillShow(_ notification: Notification) {
         setButtonHighlight(true)
-        // Measure chrome before any content size change or clamp overflow.
-        // window is guaranteed to exist at this point.
-        if let window = hostingController.view.window {
-            chromeHeight = window.frame.height - popover.contentSize.height
+        // Measure chrome using pendingChromeContentSize — the exact size we set
+        // in openPopover() — so that stale overflow from a prior session cannot
+        // corrupt the measurement. popover.contentSize itself is unsafe here.
+        if let window = hostingController.view.window,
+           let knownSize = pendingChromeContentSize {
+            chromeHeight = window.frame.height - knownSize.height
+            pendingChromeContentSize = nil
             mbkLog("PopoverController", "popoverWillShow — chromeHeight=\(chromeHeight!)")
         }
     }
