@@ -170,10 +170,23 @@ public final class MBKPopoverController: NSObject {
     /// Bypasses the overlay gate to force-close the popover together with any active overlay.
     /// Fires onWillForceClose BEFORE clearing the gate or closing, so the host app can
     /// snapshot state while isSheetPresented and route are still correct.
+    /// Removes any child sheet windows first so performClose is not swallowed by AppKit
+    /// when the sheet window holds focus.
     private func forceClose() {
         mbkLog("PopoverController", "forceClose — snapshotting before teardown")
         onWillForceClose?()
         overlayGate.hasActiveOverlay = false
+        // Remove child sheet windows before closing the popover.
+        // When the sheet is a child window and holds focus, performClose on the
+        // popover is swallowed by AppKit. Detaching and hiding the child first
+        // returns focus to the popover window so performClose proceeds normally.
+        if let popoverWindow = hostingController.view.window {
+            for child in (popoverWindow.childWindows ?? []) {
+                mbkLog("PopoverController", "forceClose — removing child window")
+                popoverWindow.removeChildWindow(child)
+                child.orderOut(nil)
+            }
+        }
         popover.performClose(nil)
     }
 
