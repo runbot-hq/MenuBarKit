@@ -90,14 +90,11 @@ struct SettingsView: View {
                     Text("Alert should appear. Popover stays alive.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                .mbkAlert(
-                    isPresented: $appState.showAlert,
-                    overlayGate: overlayGate,
-                    title: "Test Alert",
-                    message: "Popover must stay open.",
-                    primaryButton: .default(Text("OK")) { appState.showAlert = false },
-                    secondaryButton: .cancel { appState.showAlert = false }
-                )
+                .mbkAlert("Test Alert", isPresented: $appState.showAlert, overlayGate: overlayGate) {
+                    Button("OK", role: .cancel) { appState.showAlert = false }
+                } message: {
+                    Text("Popover must stay open.")
+                }
 
                 Button("← Back") { appState.route = .main }
             }

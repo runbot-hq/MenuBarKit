@@ -17,6 +17,7 @@ final class AppState {
     var route: AppRoute = .main
     var pickedURL: URL?
     var showAlert: Bool = false
+    var showSheetAlert: Bool = false
 
     // Async-loaded list items — mimic run-bot's @Observable workflow rows
     // that populate after the popover opens.
