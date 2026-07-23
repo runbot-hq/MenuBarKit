@@ -49,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // isSheetPresented is intentionally NOT restored here.
         // See file header for explanation.
-        popoverController.onDidShow = { _ in }
+        popoverController.onDidShow = nil
 
         // Normal close — snapshot route only; sheet always false.
         popoverController.onDidClose = { [weak self] in
