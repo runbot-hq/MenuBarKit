@@ -51,6 +51,20 @@
 //   Gate is cleared in onChange(false) synchronously. addChildWindow removal
 //   is handled by AppKit automatically when the child window closes.
 //
+// ANCHOR OBSERVER DISCRIMINATOR:
+//   The observer must match SwiftUI sheet windows and reject everything else,
+//   in particular NSOpenPanel presented via beginSheetModal(for: popoverWindow).
+//   Two guards achieve this:
+//
+//   1. window.styleMask == .borderless (exact equality, not .contains)
+//      SwiftUI sheet windows have exactly .borderless and no other bits.
+//      NSOpenPanel has .titled | .closable | .resizable even as a sheet modal.
+//
+//   2. !popoverWindow.sheets.contains(window)
+//      NSOpenPanel presented via beginSheetModal(for: popoverWindow) appears
+//      in popoverWindow.sheets. SwiftUI sheet windows added via addChildWindow
+//      never appear in .sheets. This is the definitive discriminator.
+//
 // WHY Item: Identifiable & Equatable (not just Identifiable):
 //   onChange(of:) requires Equatable so SwiftUI can diff old vs new values.
 //   MBKAnchoredSheetItemModifier uses onChange to observe the full item so it
@@ -62,7 +76,7 @@ import SwiftUI
 // MARK: - Module-level anchor helper
 
 /// Observes NSWindow.didBecomeKeyNotification and wires the first matching
-/// borderless window as a child of `popoverWindow` via addChildWindow.
+/// SwiftUI sheet window as a child of `popoverWindow` via addChildWindow.
 /// Arms overlayGate.hasActiveOverlay ONLY after addChildWindow succeeds.
 /// Returns a cancellable token — call `cancel()` if the sheet is dismissed
 /// before its window appeared.
@@ -104,7 +118,12 @@ final class MBKSheetAnchorTask {
                 guard
                     let window = candidate,
                     window !== self.popoverWindow,
-                    window.styleMask.contains(.borderless)
+                    // Exact match — SwiftUI sheet windows have only .borderless.
+                    // NSOpenPanel has .titled | .closable | .resizable even as a sheet modal.
+                    window.styleMask == .borderless,
+                    // Definitive discriminator: NSOpenPanel attached via beginSheetModal
+                    // appears in popoverWindow.sheets; SwiftUI sheet windows do not.
+                    !self.popoverWindow.sheets.contains(window)
                 else { return }
                 self.removeObserver()
                 mbkLog("AnchoredSheet[\(self.label)]", "addChildWindow — windowNumber=\(window.windowNumber)")
@@ -156,7 +175,7 @@ public extension View {
     /// `Item` must conform to both `Identifiable` and `Equatable` — see file header.
     func mbkSheet<Item: Identifiable & Equatable, SheetContent: View>(
         item: Binding<Item?>,
-        @ViewBuilder content: @escaping (Item) -> SheetContent
+        @ViewBuilder content: @escaping () -> SheetContent
     ) -> some View {
         modifier(MBKAnchoredSheetItemModifier(
             item: item,
