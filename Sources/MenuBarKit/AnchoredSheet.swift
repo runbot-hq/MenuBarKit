@@ -175,7 +175,7 @@ public extension View {
     /// `Item` must conform to both `Identifiable` and `Equatable` — see file header.
     func mbkSheet<Item: Identifiable & Equatable, SheetContent: View>(
         item: Binding<Item?>,
-        @ViewBuilder content: @escaping () -> SheetContent
+        @ViewBuilder content: @escaping (Item) -> SheetContent
     ) -> some View {
         modifier(MBKAnchoredSheetItemModifier(
             item: item,
