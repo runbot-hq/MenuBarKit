@@ -34,16 +34,20 @@
 //   ❌ EARLIEST ATTEMPT: close() + show() on width change.
 //      Two WindowServer frames — visible lateral jump.
 //
-//   ⚠️  CRITICAL GOTCHA — SIZE OBSERVATION: observe from SwiftUI only.
-//      NSView KVO / frameDidChangeNotification silently fail inside
-//      NSPopover. Use GeometryReader + onChange (see setupPopover()).
+//   ⚠️  SIZE SIGNAL — preferredContentSize KVO (sizingOptions = .preferredContentSize):
+//      SwiftUI reports its ideal size through NSHostingController.preferredContentSize.
+//      AppKit KVO fires applyContentSize whenever that value changes — including on
+//      first layout after show(), and on every subsequent content change.
+//      This is the native SwiftUI→AppKit sizing channel. No GeometryReader wrapper,
+//      no layoutSubtreeIfNeeded, no fittingSize reads needed.
+//
+//   ⚠️  OPEN SIZE: popover.show() is called at whatever contentSize was last recorded.
+//      The first KVO fire after show() corrects it to the real content size.
+//      This means there may be one layout frame at the wrong size — acceptable because
+//      NSPopover.animates = false and the window is not yet visible to the user at
+//      the instant show() is called (WindowServer composites the first frame).
 //
 //   ⚠️  NEVER call show() with a degenerate positioningRect.
-//
-//   ⚠️  LAYOUT BEFORE FITTING: always call layoutSubtreeIfNeeded() before
-//      reading fittingSize. Without it SwiftUI returns a stale size from
-//      the previous layout pass (e.g. header-only 33pt) because the
-//      hosting view has not yet measured the current content.
 
 import AppKit
 import SwiftUI
@@ -62,6 +66,7 @@ public final class MBKPopoverController: NSObject {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var hostingController: NSHostingController<AnyView>!
+    private var sizeObservation: NSKeyValueObservation?
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
@@ -108,28 +113,24 @@ public final class MBKPopoverController: NSObject {
 
     @objc private func togglePopover() {
         if popover.isShown {
+            mbkLog("PopoverController", "togglePopover — closing")
             popover.performClose(nil)
         } else {
+            mbkLog("PopoverController", "togglePopover — opening")
             openPopover()
         }
     }
 
     private func openPopover() {
-        guard let button = statusItem.button else { return }
-
-        // Force a synchronous layout pass before reading fittingSize.
-        // Without this, fittingSize reflects the previous layout (e.g.
-        // header-only 33pt) because SwiftUI hasn't measured the current
-        // content yet. layoutSubtreeIfNeeded() drives a full measure pass
-        // so fittingSize returns the correct full-content height.
-        hostingController.view.layoutSubtreeIfNeeded()
-
-        let fitting = hostingController.view.fittingSize
-        if fitting.width > 0, fitting.height > 0 {
-            popover.contentSize = fitting
-            mbkLog("PopoverController", "openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
+        guard let button = statusItem.button else {
+            mbkLog("PopoverController", "openPopover — aborted: no status button")
+            return
         }
-
+        // Show at last-recorded contentSize. preferredContentSize KVO fires
+        // after the first layout pass and applyContentSize corrects the size.
+        // No pre-sizing, no AppKit measurement hacks.
+        mbkLog("PopoverController", "openPopover — contentSize at show=" +
+               "(\(popover.contentSize.width),\(popover.contentSize.height))")
         guard let rect = positioningRect(for: button) else { return }
         popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
@@ -142,7 +143,7 @@ public final class MBKPopoverController: NSObject {
     private func positioningRect(for button: NSStatusBarButton) -> NSRect? {
         let bounds = button.bounds
         guard bounds.width > 0, bounds.height > 0 else {
-            mbkLog("PopoverController", "positioningRect — skipped: button.bounds is degenerate \(bounds)")
+            mbkLog("PopoverController", "positioningRect — skipped: button.bounds degenerate \(bounds)")
             return nil
         }
         return NSRect(x: bounds.midX - 0.5, y: bounds.minY, width: 1, height: bounds.height)
@@ -155,26 +156,34 @@ public final class MBKPopoverController: NSObject {
     // MARK: - Popover setup
 
     private func setupPopover() {
-        let wrapped = pendingRootView
-            .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .onChange(of: geo.size) { [weak self] _, newSize in
-                            self?.applyContentSize(newSize)
-                        }
-                        .onAppear { [weak self] in
-                            self?.applyContentSize(geo.size)
-                        }
-                }
-            )
-        hostingController = NSHostingController(rootView: AnyView(wrapped))
-        hostingController.sizingOptions = []
+        hostingController = NSHostingController(rootView: pendingRootView)
+        // .preferredContentSize tells AppKit to observe SwiftUI's ideal size
+        // and update preferredContentSize automatically on every layout pass.
+        // Our KVO observer below calls applyContentSize whenever it changes.
+        hostingController.sizingOptions = .preferredContentSize
+        mbkLog("PopoverController", "setupPopover — sizingOptions=.preferredContentSize")
+
+        // KVO on preferredContentSize is the sizing signal.
+        // This fires on every SwiftUI layout pass that produces a new size —
+        // including the first pass after show(), and on content changes.
+        sizeObservation = hostingController.observe(
+            \.preferredContentSize,
+            options: [.new]
+        ) { [weak self] _, change in
+            guard let self, let newSize = change.newValue else { return }
+            mbkLog("PopoverController", "KVO preferredContentSize → (\(newSize.width),\(newSize.height))")
+            Task { @MainActor [weak self] in
+                self?.applyContentSize(newSize)
+            }
+        }
+
         popover = NSPopover()
         popover.contentViewController = hostingController
         popover.contentSize = contentSize
         popover.animates = false
         popover.behavior = .applicationDefined
         popover.delegate = self
+        mbkLog("PopoverController", "setupPopover — initial contentSize=(\(contentSize.width),\(contentSize.height))")
     }
 
     /// Applies a new preferred content size to the popover.
@@ -184,11 +193,14 @@ public final class MBKPopoverController: NSObject {
     /// default grow-from-bottom-left behaviour without mixing content and
     /// chrome coordinate spaces.
     private func applyContentSize(_ preferred: CGSize) {
-        guard preferred.width > 0, preferred.height > 0 else { return }
+        guard preferred.width > 0, preferred.height > 0 else {
+            mbkLog("PopoverController", "applyContentSize — skipped: degenerate (\(preferred.width),\(preferred.height))")
+            return
+        }
         let currentSize = popover.contentSize
         guard abs(currentSize.width - preferred.width) > 1
            || abs(currentSize.height - preferred.height) > 1 else {
-            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
+            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged (\(currentSize.width),\(currentSize.height))")
             return
         }
 
@@ -198,21 +210,30 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
+        // Capture current window origin BEFORE mutating contentSize.
+        // AppKit repositions the window as a side-effect of contentSize change,
+        // so we must read first, then write, then correct.
         let oldFrame = window.frame
-        let dw = preferred.width - currentSize.width
+        let dw = preferred.width  - currentSize.width
         let dh = preferred.height - currentSize.height
 
         mbkLog("PopoverController",
-               "applyContentSize — (\(currentSize.width),\(currentSize.height))→"
-               + "(\(preferred.width),\(preferred.height)) dw=\(dw) dh=\(dh)")
+               "applyContentSize — (\(currentSize.width),\(currentSize.height))"
+               + "→(\(preferred.width),\(preferred.height)) dw=\(dw) dh=\(dh)")
 
         popover.contentSize = preferred
 
+        // Shift origin to keep midX and maxY fixed:
+        //   origin.x -= dw/2  → grows/shrinks symmetrically, midX stays pinned
+        //   origin.y -= dh    → grows downward, top edge stays touching arrow
         var newOrigin = oldFrame.origin
         newOrigin.x -= dw / 2
         newOrigin.y -= dh
+        // Round to integer pixels to prevent sub-pixel drift accumulation.
+        newOrigin.x = round(newOrigin.x)
+        newOrigin.y = round(newOrigin.y)
         window.setFrameOrigin(newOrigin)
-        mbkLog("PopoverController", "applyContentSize — origin set to \(newOrigin)")
+        mbkLog("PopoverController", "applyContentSize — origin set to (\(newOrigin.x),\(newOrigin.y))")
     }
 
     // MARK: - Workspace observer
@@ -232,7 +253,7 @@ public final class MBKPopoverController: NSObject {
                     return
                 }
                 guard !overlayGate.hasActiveOverlay else {
-                    mbkLog("PopoverController", "workspace observer — overlay active, keeping popover open")
+                    mbkLog("PopoverController", "workspace observer — overlay active, keeping open")
                     return
                 }
                 mbkLog("PopoverController", "workspace observer — other app active, closing")
@@ -263,6 +284,7 @@ public final class MBKPopoverController: NSObject {
     }
 
     deinit {
+        sizeObservation?.invalidate()
         if let observer = workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
@@ -277,6 +299,7 @@ public final class MBKPopoverController: NSObject {
 extension MBKPopoverController: NSPopoverDelegate {
     public func popoverWillShow(_ notification: Notification) {
         setButtonHighlight(true)
+        mbkLog("PopoverController", "popoverWillShow")
     }
 
     public func popoverShouldClose(_ popover: NSPopover) -> Bool {
