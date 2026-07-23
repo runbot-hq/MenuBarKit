@@ -25,6 +25,7 @@ struct RootView: View {
             case .settings: SettingsView()
             }
         }
+        .background(.clear) // ← nuke any opaque default bg on the Group
         .background(
             GeometryReader { geo in
                 Color.clear

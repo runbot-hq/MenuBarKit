@@ -112,7 +112,10 @@ struct MainView: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
             }
+            .scrollContentBackground(.hidden) // ← nuke grey ScrollView bg
+            .background(.clear)               // ← belt-and-braces
         }
+        .background(.clear) // ← nuke root VStack default opaque bg
         // No fixed width — content-driven. .fixedSize() makes the root VStack
         // report its intrinsic size so preferredContentSize KVO fires correctly.
         // PopoverController clamps the result to [minWidth, maxWidth] x maxHeight.

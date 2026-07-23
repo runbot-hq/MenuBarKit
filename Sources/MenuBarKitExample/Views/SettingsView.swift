@@ -49,7 +49,9 @@ struct SettingsView: View {
                 }
                 .padding(.vertical, 4)
             }
-            .frame(maxHeight: scrollMaxHeight)  // cap here — VStack reports true intrinsic height
+            .scrollContentBackground(.hidden) // ← nuke grey ScrollView bg
+            .background(.clear)               // ← belt-and-braces
+            .frame(maxHeight: scrollMaxHeight)
 
             Divider()
 
@@ -68,7 +70,12 @@ struct SettingsView: View {
                     Text(url.lastPathComponent).font(.caption).foregroundStyle(.secondary)
                 }
 
-                GroupBox("Alert from popover") {
+                // GroupBox removed — it paints an opaque grouped background
+                // that blocks liquid glass refraction. Replaced with plain VStack.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Alert from popover")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Button("Show alert") { appState.showAlert = true }
                     Text("Alert should appear. Popover stays alive.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -84,6 +91,7 @@ struct SettingsView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
+        .background(.clear) // ← nuke root VStack default opaque bg
         .frame(width: 320)
         .fixedSize(horizontal: true, vertical: false)
         .onAppear {
