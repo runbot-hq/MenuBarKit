@@ -19,15 +19,16 @@
 //
 // VISUAL CHROME:
 //   NSGlassEffectView (macOS 26+, WWDC25 session 310) is used directly as
-//   panel.contentView. This is the documented approach for Tahoe liquid-glass
-//   panels. cornerRadius + style are set directly on the glass view.
-//   hostingController.view is assigned to glassView.contentView (not addSubview).
+//   panel.contentView. This is the correct pattern — NSVisualEffectView must
+//   NOT be used as a wrapper because it prevents NSGlassEffectView from showing
+//   through (WWDC25 session 310 explicitly warns against this).
 //
 // ROUNDED CORNERS / addChildWindow:
-//   If cornerRadius goes square when a sheet is opened via addChildWindow(),
-//   the fix is a plain NSView subclass that re-sets cornerRadius in layout()
-//   after AppKit resets it. The NSVisualEffectView.maskImage wrapper approach
-//   was rejected because it adds a visible bright grey material on top of the glass.
+//   NSGlassEffectView.cornerRadius is reset by AppKit when addChildWindow() is
+//   called (compositing mode change). Fix: observe didAddChildWindowNotification
+//   and didRemoveChildWindowNotification on the panel and immediately re-set
+//   cornerRadius on the glassView after each event. This is the minimal,
+//   non-invasive fix that doesn't require any VEV wrapper.
 //
 // SIZE CLAMPING:
 //   applyContentSize clamps preferredContentSize to [minWidth, maxWidth] x maxHeight.
@@ -58,8 +59,10 @@ public final class MBKPopoverController: NSObject {
 
     private var statusItem: NSStatusItem!
     private var panel: NSPanel!
+    private var glassView: NSGlassEffectView!
     private var hostingController: NSHostingController<AnyView>!
     private var sizeObservation: NSKeyValueObservation?
+    private var childWindowObservers: [NSObjectProtocol] = []
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
@@ -201,16 +204,41 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // NSGlassEffectView directly as panel.contentView.
-        // This is the correct documented API for Tahoe liquid-glass panels.
-        // contentView embeds the SwiftUI hosting view inside the glass effect.
-        let glassView = NSGlassEffectView()
+        // NSGlassEffectView directly as panel.contentView — correct Tahoe API.
+        // No NSVisualEffectView wrapper: VEV prevents glass from showing through
+        // (WWDC25 session 310). cornerRadius is re-asserted after addChildWindow
+        // via notification observers (see setupChildWindowObservers).
+        glassView = NSGlassEffectView()
         glassView.cornerRadius = cornerRadius
         glassView.style = .regular
         glassView.contentView = hostingController.view
-
         panel.contentView = glassView
+
+        setupChildWindowObservers()
         mbkLog("PopoverController", "setupPanel — initialSize=(\(initialSize.width),\(initialSize.height))")
+    }
+
+    /// Re-asserts cornerRadius after addChildWindow/removeChildWindow resets it.
+    private func setupChildWindowObservers() {
+        let add = NotificationCenter.default.addObserver(
+            forName: NSWindow.didAddChildWindowNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            mbkLog("PopoverController", "didAddChildWindow — re-asserting cornerRadius")
+            self.glassView.cornerRadius = self.cornerRadius
+        }
+        let remove = NotificationCenter.default.addObserver(
+            forName: NSWindow.didRemoveChildWindowNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            mbkLog("PopoverController", "didRemoveChildWindow — re-asserting cornerRadius")
+            self.glassView.cornerRadius = self.cornerRadius
+        }
+        childWindowObservers = [add, remove]
     }
 
     private func clamp(_ size: CGSize) -> CGSize {
@@ -299,6 +327,9 @@ public final class MBKPopoverController: NSObject {
 
     deinit {
         sizeObservation?.invalidate()
+        for observer in childWindowObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
         if let observer = workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
