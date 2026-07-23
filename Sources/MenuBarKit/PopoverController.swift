@@ -2,51 +2,48 @@
 // MenuBarKit
 //
 // Owns the NSPanel + NSStatusItem lifecycle for a macOS menu-bar app.
-// Zero knowledge of the host app's views or state — all app-specific
-// behaviour is injected via closures at configuration time.
-//
-// SIZING MODEL:
-//   NSHostingController.sizingOptions = .preferredContentSize
-//   SwiftUI reports its ideal size via preferredContentSize.
-//   KVO fires applyContentSize on every layout pass that produces a new size.
-//   applyContentSize calls panel.setFrame() — free resize, no re-anchor.
-//
-// POSITIONING MODEL:
-//   On open: panel left edge aligns with the left edge of the status button,
-//   clamped so the panel never overflows the screen's visible frame.
-//   On resize: anchorX (button.minX in screen coords) + anchorY are
-//   re-used to recompute origin from the new size.
 //
 // VISUAL CHROME:
 //   NSGlassEffectView (macOS 26+, WWDC25 session 310) is used directly as
-//   panel.contentView. This is the correct pattern — NSVisualEffectView must
-//   NOT be used as a wrapper because it prevents NSGlassEffectView from showing
-//   through (WWDC25 session 310 explicitly warns against this).
+//   panel.contentView. NSVisualEffectView must NOT wrap it — VEV prevents
+//   NSGlassEffectView from showing through (WWDC25 session 310).
 //
 // ROUNDED CORNERS / addChildWindow:
-//   NSGlassEffectView.cornerRadius is reset by AppKit when addChildWindow() is
-//   called (compositing mode change). Fix: observe didAddChildWindowNotification
-//   and didRemoveChildWindowNotification on the panel and immediately re-set
-//   cornerRadius on the glassView after each event. This is the minimal,
-//   non-invasive fix that doesn't require any VEV wrapper.
-//
-// SIZE CLAMPING:
-//   applyContentSize clamps preferredContentSize to [minWidth, maxWidth] x maxHeight.
-//
-// SHEETS / OVERLAY GATE:
-//   MBKAnchoredSheet anchors sheets as child windows of the panel.
-//   MBKOverlayGate blocks panel close while an overlay is active.
-//
-// STATUS BUTTON HIGHLIGHT:
-//   button.highlight(true/false) keeps the status icon selected while open.
+//   AppKit resets NSGlassEffectView.cornerRadius when addChildWindow() is
+//   called (compositing mode change for the sheet child window).
+//   Fix: MBKPanel subclasses NSPanel and overrides addChildWindow(_:ordered:)
+//   and removeChildWindow(_:) to re-assert cornerRadius on glassView after
+//   each call to super. No notification names needed.
 
 import AppKit
 import SwiftUI
 
+// MARK: - MBKPanel
+
+/// NSPanel subclass that re-asserts NSGlassEffectView.cornerRadius after
+/// addChildWindow/removeChildWindow, which AppKit resets during compositing
+/// mode changes triggered by child window attachment.
+private final class MBKPanel: NSPanel {
+    var glassView: NSGlassEffectView?
+    var desiredCornerRadius: CGFloat = 20
+
+    override func addChildWindow(_ childWin: NSWindow, ordered place: NSWindow.OrderingMode) {
+        super.addChildWindow(childWin, ordered: place)
+        glassView?.cornerRadius = desiredCornerRadius
+        mbkLog("MBKPanel", "addChildWindow — re-asserted cornerRadius=\(desiredCornerRadius)")
+    }
+
+    override func removeChildWindow(_ childWin: NSWindow) {
+        super.removeChildWindow(childWin)
+        glassView?.cornerRadius = desiredCornerRadius
+        mbkLog("MBKPanel", "removeChildWindow — re-asserted cornerRadius=\(desiredCornerRadius)")
+    }
+}
+
+// MARK: - MBKPopoverController
+
 @MainActor
 public final class MBKPopoverController: NSObject {
-
-    // MARK: - Configuration
 
     private let overlayGate: MBKOverlayGate
     private let symbolName: String
@@ -55,23 +52,16 @@ public final class MBKPopoverController: NSObject {
     private let maxWidth: CGFloat
     private let maxHeight: CGFloat
 
-    // MARK: - Owned objects
-
     private var statusItem: NSStatusItem!
-    private var panel: NSPanel!
-    private var glassView: NSGlassEffectView!
+    private var panel: MBKPanel!
     private var hostingController: NSHostingController<AnyView>!
     private var sizeObservation: NSKeyValueObservation?
-    private var childWindowObservers: [NSObjectProtocol] = []
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
-    /// Left edge of the status button in screen coordinates, captured at open time.
     private var anchorX: CGFloat = 0
-    /// Bottom edge of the status button in screen coordinates, captured at open time.
     private var anchorY: CGFloat = 0
-
     private let cornerRadius: CGFloat = 20
 
     // MARK: - Init
@@ -136,15 +126,11 @@ public final class MBKPopoverController: NSObject {
             mbkLog("PopoverController", "openPanel — aborted: no button or screen")
             return
         }
-
         let buttonRectInWindow = button.convert(button.bounds, to: nil)
         let buttonRectOnScreen = button.window?.convertToScreen(buttonRectInWindow)
             ?? NSRect(x: screen.frame.midX, y: screen.visibleFrame.maxY, width: 0, height: 0)
-
         anchorX = buttonRectOnScreen.minX
         anchorY = buttonRectOnScreen.minY
-        mbkLog("PopoverController", "openPanel — anchor=(\(anchorX),\(anchorY))")
-
         let size = panel.frame.size
         let clampedX = min(anchorX, screen.visibleFrame.maxX - size.width)
         let origin = NSPoint(
@@ -155,7 +141,6 @@ public final class MBKPopoverController: NSObject {
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         setButtonHighlight(true)
-        mbkLog("PopoverController", "openPanel — frame=(\(panel.frame))")
         startEventMonitor()
     }
 
@@ -168,7 +153,6 @@ public final class MBKPopoverController: NSObject {
         setButtonHighlight(false)
         stopEventMonitor()
         overlayGate.hasActiveOverlay = false
-        mbkLog("PopoverController", "closePanel — closed")
     }
 
     private func setButtonHighlight(_ on: Bool) {
@@ -180,20 +164,16 @@ public final class MBKPopoverController: NSObject {
     private func setupPanel() {
         hostingController = NSHostingController(rootView: pendingRootView)
         hostingController.sizingOptions = .preferredContentSize
-        mbkLog("PopoverController", "setupPanel — sizingOptions=.preferredContentSize")
 
         sizeObservation = hostingController.observe(
             \.preferredContentSize,
             options: [.new]
         ) { [weak self] _, change in
             guard let self, let newSize = change.newValue else { return }
-            mbkLog("PopoverController", "KVO preferredContentSize → (\(newSize.width),\(newSize.height))")
-            Task { @MainActor [weak self] in
-                self?.applyContentSize(newSize)
-            }
+            Task { @MainActor [weak self] in self?.applyContentSize(newSize) }
         }
 
-        panel = NSPanel(
+        panel = MBKPanel(
             contentRect: NSRect(origin: .zero, size: initialSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -203,42 +183,14 @@ public final class MBKPopoverController: NSObject {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+        panel.desiredCornerRadius = cornerRadius
 
-        // NSGlassEffectView directly as panel.contentView — correct Tahoe API.
-        // No NSVisualEffectView wrapper: VEV prevents glass from showing through
-        // (WWDC25 session 310). cornerRadius is re-asserted after addChildWindow
-        // via notification observers (see setupChildWindowObservers).
-        glassView = NSGlassEffectView()
+        let glassView = NSGlassEffectView()
         glassView.cornerRadius = cornerRadius
         glassView.style = .regular
         glassView.contentView = hostingController.view
         panel.contentView = glassView
-
-        setupChildWindowObservers()
-        mbkLog("PopoverController", "setupPanel — initialSize=(\(initialSize.width),\(initialSize.height))")
-    }
-
-    /// Re-asserts cornerRadius after addChildWindow/removeChildWindow resets it.
-    private func setupChildWindowObservers() {
-        let add = NotificationCenter.default.addObserver(
-            forName: NSWindow.didAddChildWindowNotification,
-            object: panel,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            mbkLog("PopoverController", "didAddChildWindow — re-asserting cornerRadius")
-            self.glassView.cornerRadius = self.cornerRadius
-        }
-        let remove = NotificationCenter.default.addObserver(
-            forName: NSWindow.didRemoveChildWindowNotification,
-            object: panel,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            mbkLog("PopoverController", "didRemoveChildWindow — re-asserting cornerRadius")
-            self.glassView.cornerRadius = self.cornerRadius
-        }
-        childWindowObservers = [add, remove]
+        panel.glassView = glassView
     }
 
     private func clamp(_ size: CGSize) -> CGSize {
@@ -250,32 +202,20 @@ public final class MBKPopoverController: NSObject {
 
     private func applyContentSize(_ preferred: CGSize) {
         let clamped = clamp(preferred)
-        guard clamped.width > 0, clamped.height > 0 else {
-            mbkLog("PopoverController", "applyContentSize — skipped: degenerate after clamp")
-            return
-        }
+        guard clamped.width > 0, clamped.height > 0 else { return }
         let currentSize = panel.frame.size
         guard abs(currentSize.width  - clamped.width)  >= 1
-           || abs(currentSize.height - clamped.height) >= 1 else {
-            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
-            return
-        }
+           || abs(currentSize.height - clamped.height) >= 1 else { return }
 
         guard panel.isVisible else {
             panel.setContentSize(clamped)
-            mbkLog("PopoverController", "applyContentSize — not visible, pre-sized to (\(clamped.width),\(clamped.height))")
             return
         }
-
         let newOrigin = NSPoint(
             x: round(anchorX - clamped.width / 2),
             y: round(anchorY - clamped.height)
         )
-        let newFrame = NSRect(origin: newOrigin, size: clamped)
-        mbkLog("PopoverController",
-               "applyContentSize — (\(currentSize.width),\(currentSize.height))"
-               + "→(\(clamped.width),\(clamped.height)) origin=(\(newOrigin.x),\(newOrigin.y))")
-        panel.setFrame(newFrame, display: true, animate: false)
+        panel.setFrame(NSRect(origin: newOrigin, size: clamped), display: true, animate: false)
     }
 
     // MARK: - Workspace observer
@@ -290,15 +230,8 @@ public final class MBKPopoverController: NSObject {
                 as? NSRunningApplication
             Task { @MainActor [weak self] in
                 guard let self, self.panel.isVisible else { return }
-                guard activated != NSRunningApplication.current else {
-                    mbkLog("PopoverController", "workspace observer — self-activation, ignoring")
-                    return
-                }
-                guard !self.overlayGate.hasActiveOverlay else {
-                    mbkLog("PopoverController", "workspace observer — overlay active, keeping open")
-                    return
-                }
-                mbkLog("PopoverController", "workspace observer — other app active, closing")
+                guard activated != NSRunningApplication.current else { return }
+                guard !self.overlayGate.hasActiveOverlay else { return }
                 self.closePanel()
             }
         }
@@ -311,25 +244,18 @@ public final class MBKPopoverController: NSObject {
         eventMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.closePanel()
-            }
+            Task { @MainActor [weak self] in self?.closePanel() }
         }
-        mbkLog("PopoverController", "event monitor started")
     }
 
     private func stopEventMonitor() {
         guard let monitor = eventMonitor else { return }
         NSEvent.removeMonitor(monitor)
         eventMonitor = nil
-        mbkLog("PopoverController", "event monitor stopped")
     }
 
     deinit {
         sizeObservation?.invalidate()
-        for observer in childWindowObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
         if let observer = workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
