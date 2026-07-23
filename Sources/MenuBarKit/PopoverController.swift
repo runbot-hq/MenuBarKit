@@ -1,53 +1,36 @@
 // PopoverController.swift
 // MenuBarKit
 //
-// Owns the full NSPopover + NSStatusItem lifecycle for a macOS menu-bar app.
-// Zero knowledge of the host app's views or state — all app-specific behaviour
-// is injected via closures at configuration time.
+// Owns the NSPanel + NSStatusItem lifecycle for a macOS menu-bar app.
+// Zero knowledge of the host app's views or state — all app-specific
+// behaviour is injected via closures at configuration time.
 //
-// ARROW CENTERING:
-//   NSPopover only centers its box around positioningRect ONCE, at show()
-//   time. Mutating contentSize alone on an already-visible popover does NOT
-//   re-trigger that centering — the box just grows/shrinks from a fixed
-//   edge, desyncing visibly from the arrow.
+// SIZING MODEL:
+//   NSHostingController.sizingOptions = .preferredContentSize
+//   SwiftUI reports its ideal size via preferredContentSize.
+//   KVO fires applyContentSize on every layout pass that produces a new size.
+//   applyContentSize calls panel.setFrame() — free resize, no re-anchor.
 //
-//   FIX (current): after setting popover.contentSize, compensate for
-//   AppKit's grow-from-edge default by shifting the window origin by the
-//   size delta — NOT by recomputing origin from scratch:
-//     - dx = (newWidth - oldWidth) / 2  → shift origin.x left by dx
-//       so window.midX stays pinned to the same screen position.
-//     - dy = newHeight - oldHeight      → shift origin.y down by dy
-//       so window.maxY stays pinned (top edge stays touching the arrow).
-//   This works entirely in window-frame space and never mixes content
-//   size with chrome dimensions.
+// POSITIONING MODEL:
+//   anchorX is captured ONCE at open time: button.midX in screen coords.
+//   On every resize, frame is recomputed from anchorX + new size:
+//     frame.origin.x = anchorX - size.width / 2
+//     frame.origin.y = buttonScreenMinY - size.height
+//   anchorX is never re-read from the button while the panel is open.
+//   This avoids the menu-bar auto-hide instability (button screen-Y
+//   changes between open/close cycles on auto-hide displays).
 //
-//   ❌ PRIOR ATTEMPT: set frame.size = contentSize, then recomputed
-//      frame.origin.x = anchorX - contentSize.width / 2. Wrong because
-//      anchorX = window.frame.midX includes chrome (shadow/border)
-//      but contentSize does not — mixing the two spaces shifted the
-//      window ~100pt left, placing it at the screen edge.
+// WHY NOT NSPopover:
+//   NSPopover.contentSize re-anchors the popover window on every write
+//   while shown. There is no clean way to compensate for this — delta
+//   math + setFrameOrigin fights AppKit and produces side-jumps on any
+//   intermediate layout frame (e.g. SwiftUI emitting width before height
+//   on a route transition). NSPanel.setFrame() has no such constraint.
 //
-//   ❌ EARLIER ATTEMPT: re-queried button screen coords on every resize.
-//      button.minY is NOT stable across sessions: macOS auto-hides the
-//      menu bar, changing button screen-Y between open/close cycles.
-//
-//   ❌ EARLIEST ATTEMPT: close() + show() on width change.
-//      Two WindowServer frames — visible lateral jump.
-//
-//   ⚠️  SIZE SIGNAL — preferredContentSize KVO (sizingOptions = .preferredContentSize):
-//      SwiftUI reports its ideal size through NSHostingController.preferredContentSize.
-//      AppKit KVO fires applyContentSize whenever that value changes — including on
-//      first layout after show(), and on every subsequent content change.
-//      This is the native SwiftUI→AppKit sizing channel. No GeometryReader wrapper,
-//      no layoutSubtreeIfNeeded, no fittingSize reads needed.
-//
-//   ⚠️  OPEN SIZE: popover.show() is called at whatever contentSize was last recorded.
-//      The first KVO fire after show() corrects it to the real content size.
-//      This means there may be one layout frame at the wrong size — acceptable because
-//      NSPopover.animates = false and the window is not yet visible to the user at
-//      the instant show() is called (WindowServer composites the first frame).
-//
-//   ⚠️  NEVER call show() with a degenerate positioningRect.
+// SHEETS / OVERLAY GATE:
+//   MBKAnchoredSheet renders as an overlay inside the same NSHostingController.
+//   MBKOverlayGate blocks panel close while an overlay is active.
+//   Neither depends on NSPopover — both work identically with NSPanel.
 
 import AppKit
 import SwiftUI
@@ -59,17 +42,23 @@ public final class MBKPopoverController: NSObject {
 
     private let overlayGate: MBKOverlayGate
     private let symbolName: String
-    private let contentSize: NSSize
+    private let initialSize: NSSize
 
     // MARK: - Owned objects
 
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
+    private var panel: NSPanel!
     private var hostingController: NSHostingController<AnyView>!
     private var sizeObservation: NSKeyValueObservation?
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
+
+    /// X midpoint of the status button in screen coordinates, captured at open time.
+    /// Used to re-center the panel on every resize without re-reading the button.
+    private var anchorX: CGFloat = 0
+    /// Bottom edge of the status button in screen coordinates, captured at open time.
+    private var anchorY: CGFloat = 0
 
     // MARK: - Init
 
@@ -81,7 +70,7 @@ public final class MBKPopoverController: NSObject {
     ) {
         self.overlayGate = overlayGate
         self.symbolName = symbolName
-        self.contentSize = contentSize
+        self.initialSize = contentSize
         self.pendingRootView = AnyView(rootView)
     }
 
@@ -94,7 +83,7 @@ public final class MBKPopoverController: NSObject {
         isSetUp = true
         NSApp.setActivationPolicy(.accessory)
         setupStatusItem()
-        setupPopover()
+        setupPanel()
         setupWorkspaceObserver()
         mbkLog("PopoverController", "setup complete")
     }
@@ -106,66 +95,76 @@ public final class MBKPopoverController: NSObject {
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
             button.image?.isTemplate = true
-            button.action = #selector(togglePopover)
+            button.action = #selector(togglePanel)
             button.target = self
         }
     }
 
-    @objc private func togglePopover() {
-        if popover.isShown {
-            mbkLog("PopoverController", "togglePopover — closing")
-            popover.performClose(nil)
+    @objc private func togglePanel() {
+        if panel.isVisible {
+            mbkLog("PopoverController", "togglePanel — closing")
+            closePanel()
         } else {
-            mbkLog("PopoverController", "togglePopover — opening")
-            openPopover()
+            mbkLog("PopoverController", "togglePanel — opening")
+            openPanel()
         }
     }
 
-    private func openPopover() {
-        guard let button = statusItem.button else {
-            mbkLog("PopoverController", "openPopover — aborted: no status button")
+    private func openPanel() {
+        guard let button = statusItem.button,
+              let screen = button.window?.screen ?? NSScreen.main else {
+            mbkLog("PopoverController", "openPanel — aborted: no button or screen")
             return
         }
-        // Show at last-recorded contentSize. preferredContentSize KVO fires
-        // after the first layout pass and applyContentSize corrects the size.
-        // No pre-sizing, no AppKit measurement hacks.
-        mbkLog("PopoverController", "openPopover — contentSize at show=" +
-               "(\(popover.contentSize.width),\(popover.contentSize.height))")
-        guard let rect = positioningRect(for: button) else { return }
-        popover.show(relativeTo: rect, of: button, preferredEdge: .minY)
+
+        // Capture anchor in screen coordinates once at open time.
+        // Convert button bounds origin to screen coords via the button's window.
+        let buttonRectInWindow = button.convert(button.bounds, to: nil)
+        let buttonRectOnScreen = button.window?.convertToScreen(buttonRectInWindow)
+            ?? NSRect(x: screen.frame.midX, y: screen.visibleFrame.maxY, width: 0, height: 0)
+        anchorX = buttonRectOnScreen.midX
+        anchorY = buttonRectOnScreen.minY
+        mbkLog("PopoverController", "openPanel — anchor=(\(anchorX),\(anchorY))")
+
+        // Position panel at current size, centered on anchorX, top at anchorY.
+        let size = panel.frame.size
+        let origin = NSPoint(
+            x: anchorX - size.width / 2,
+            y: anchorY - size.height
+        )
+        panel.setFrameOrigin(origin)
+        panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        mbkLog("PopoverController", "popover shown")
+        setButtonHighlight(true)
+        mbkLog("PopoverController", "openPanel — frame=(\(panel.frame))")
         startEventMonitor()
     }
 
-    /// Returns a 1pt-wide positioningRect centered on the button's midX.
-    /// Returns nil if button.bounds is degenerate (zero width/height).
-    private func positioningRect(for button: NSStatusBarButton) -> NSRect? {
-        let bounds = button.bounds
-        guard bounds.width > 0, bounds.height > 0 else {
-            mbkLog("PopoverController", "positioningRect — skipped: button.bounds degenerate \(bounds)")
-            return nil
+    private func closePanel() {
+        guard !overlayGate.hasActiveOverlay else {
+            mbkLog("PopoverController", "closePanel — blocked: overlay active")
+            return
         }
-        return NSRect(x: bounds.midX - 0.5, y: bounds.minY, width: 1, height: bounds.height)
+        panel.orderOut(nil)
+        setButtonHighlight(false)
+        stopEventMonitor()
+        overlayGate.hasActiveOverlay = false
+        mbkLog("PopoverController", "closePanel — closed")
     }
 
     private func setButtonHighlight(_ on: Bool) {
         statusItem.button?.isHighlighted = on
     }
 
-    // MARK: - Popover setup
+    // MARK: - Panel setup
 
-    private func setupPopover() {
+    private func setupPanel() {
         hostingController = NSHostingController(rootView: pendingRootView)
-        // .preferredContentSize tells AppKit to observe SwiftUI's ideal size
-        // and update preferredContentSize automatically on every layout pass.
-        // Our KVO observer below calls applyContentSize whenever it changes.
+        // .preferredContentSize: SwiftUI reports ideal size on every layout pass.
+        // KVO observer below calls applyContentSize whenever it changes.
         hostingController.sizingOptions = .preferredContentSize
-        mbkLog("PopoverController", "setupPopover — sizingOptions=.preferredContentSize")
+        mbkLog("PopoverController", "setupPanel — sizingOptions=.preferredContentSize")
 
-        // KVO on preferredContentSize is the sizing signal.
-        // This fires on every SwiftUI layout pass that produces a new size —
-        // including the first pass after show(), and on content changes.
         sizeObservation = hostingController.observe(
             \.preferredContentSize,
             options: [.new]
@@ -177,63 +176,57 @@ public final class MBKPopoverController: NSObject {
             }
         }
 
-        popover = NSPopover()
-        popover.contentViewController = hostingController
-        popover.contentSize = contentSize
-        popover.animates = false
-        popover.behavior = .applicationDefined
-        popover.delegate = self
-        mbkLog("PopoverController", "setupPopover — initial contentSize=(\(contentSize.width),\(contentSize.height))")
+        // NSPanel styled as a borderless, non-activating floating panel.
+        // .popUpMenu level sits above normal windows and the menu bar overlay.
+        // .nonactivatingPanel: clicking the panel does not steal app focus.
+        panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: initialSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .popUpMenu
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.contentViewController = hostingController
+        mbkLog("PopoverController", "setupPanel — initialSize=(\(initialSize.width),\(initialSize.height))")
     }
 
-    /// Applies a new preferred content size to the popover.
+    /// Applies a new content size from SwiftUI's preferredContentSize KVO.
     ///
-    /// Sets popover.contentSize, then corrects the window origin by the
-    /// size delta so midX and maxY stay pinned — compensating for AppKit's
-    /// default grow-from-bottom-left behaviour without mixing content and
-    /// chrome coordinate spaces.
+    /// Recomputes the full panel frame from anchorX/anchorY and the new size.
+    /// No delta math — setFrame is unconditional and jump-free.
     private func applyContentSize(_ preferred: CGSize) {
         guard preferred.width > 0, preferred.height > 0 else {
             mbkLog("PopoverController", "applyContentSize — skipped: degenerate (\(preferred.width),\(preferred.height))")
             return
         }
-        let currentSize = popover.contentSize
-        guard abs(currentSize.width - preferred.width) > 1
-           || abs(currentSize.height - preferred.height) > 1 else {
-            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged (\(currentSize.width),\(currentSize.height))")
+        let currentSize = panel.frame.size
+        guard abs(currentSize.width  - preferred.width)  >= 1
+           || abs(currentSize.height - preferred.height) >= 1 else {
+            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
             return
         }
 
-        guard popover.isShown, let window = hostingController.view.window else {
-            popover.contentSize = preferred
-            mbkLog("PopoverController", "applyContentSize — not shown, recorded (\(preferred.width),\(preferred.height))")
+        guard panel.isVisible else {
+            // Panel not shown yet — just resize in place so openPanel() uses
+            // the correct size when it positions the frame.
+            panel.setContentSize(preferred)
+            mbkLog("PopoverController", "applyContentSize — not visible, pre-sized to (\(preferred.width),\(preferred.height))")
             return
         }
 
-        // Capture current window origin BEFORE mutating contentSize.
-        // AppKit repositions the window as a side-effect of contentSize change,
-        // so we must read first, then write, then correct.
-        let oldFrame = window.frame
-        let dw = preferred.width  - currentSize.width
-        let dh = preferred.height - currentSize.height
-
+        // Recompute frame from stored anchor — no delta, no drift.
+        let newOrigin = NSPoint(
+            x: round(anchorX - preferred.width / 2),
+            y: round(anchorY - preferred.height)
+        )
+        let newFrame = NSRect(origin: newOrigin, size: preferred)
         mbkLog("PopoverController",
                "applyContentSize — (\(currentSize.width),\(currentSize.height))"
-               + "→(\(preferred.width),\(preferred.height)) dw=\(dw) dh=\(dh)")
-
-        popover.contentSize = preferred
-
-        // Shift origin to keep midX and maxY fixed:
-        //   origin.x -= dw/2  → grows/shrinks symmetrically, midX stays pinned
-        //   origin.y -= dh    → grows downward, top edge stays touching arrow
-        var newOrigin = oldFrame.origin
-        newOrigin.x -= dw / 2
-        newOrigin.y -= dh
-        // Round to integer pixels to prevent sub-pixel drift accumulation.
-        newOrigin.x = round(newOrigin.x)
-        newOrigin.y = round(newOrigin.y)
-        window.setFrameOrigin(newOrigin)
-        mbkLog("PopoverController", "applyContentSize — origin set to (\(newOrigin.x),\(newOrigin.y))")
+               + "→(\(preferred.width),\(preferred.height)) origin=(\(newOrigin.x),\(newOrigin.y))")
+        panel.setFrame(newFrame, display: true, animate: false)
     }
 
     // MARK: - Workspace observer
@@ -247,17 +240,17 @@ public final class MBKPopoverController: NSObject {
             let activated = notification.userInfo?[NSWorkspace.applicationUserInfoKey]
                 as? NSRunningApplication
             Task { @MainActor [weak self] in
-                guard let self, self.popover.isShown else { return }
+                guard let self, self.panel.isVisible else { return }
                 guard activated != NSRunningApplication.current else {
                     mbkLog("PopoverController", "workspace observer — self-activation, ignoring")
                     return
                 }
-                guard !overlayGate.hasActiveOverlay else {
+                guard !self.overlayGate.hasActiveOverlay else {
                     mbkLog("PopoverController", "workspace observer — overlay active, keeping open")
                     return
                 }
                 mbkLog("PopoverController", "workspace observer — other app active, closing")
-                self.popover.performClose(nil)
+                self.closePanel()
             }
         }
     }
@@ -270,7 +263,7 @@ public final class MBKPopoverController: NSObject {
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.popover.performClose(nil)
+                self?.closePanel()
             }
         }
         mbkLog("PopoverController", "event monitor started")
@@ -291,28 +284,5 @@ public final class MBKPopoverController: NSObject {
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
         }
-    }
-}
-
-// MARK: - NSPopoverDelegate
-
-extension MBKPopoverController: NSPopoverDelegate {
-    public func popoverWillShow(_ notification: Notification) {
-        setButtonHighlight(true)
-        mbkLog("PopoverController", "popoverWillShow")
-    }
-
-    public func popoverShouldClose(_ popover: NSPopover) -> Bool {
-        let block = overlayGate.hasActiveOverlay
-        mbkLog("PopoverController", "popoverShouldClose blocked=\(block)")
-        return !block
-    }
-
-    public func popoverDidClose(_ notification: Notification) {
-        mbkLog("PopoverController", "popoverDidClose")
-        setButtonHighlight(false)
-        stopEventMonitor()
-        overlayGate.hasActiveOverlay = false
-        mbkLog("PopoverController", "overlay gate reset on close")
     }
 }
