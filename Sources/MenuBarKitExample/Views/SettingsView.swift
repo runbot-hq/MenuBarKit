@@ -11,6 +11,9 @@
 // resizes horizontally based on whatever is visible. The "Show wide row"
 // toggle reveals a wide element, forcing a horizontal resize — this
 // exercises the delta-based centering fix with UI-driven width changes.
+//
+// isSheetPresented is owned by AppState (not local @State) so it survives
+// popover close/reopen and can be restored via SessionSnapshot.
 
 import MenuBarKit
 import SwiftUI
@@ -20,7 +23,6 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppState.self) private var appState
     @Environment(MBKOverlayGate.self) private var overlayGate
-    @State private var showSheet = false
     @State private var showWideRow = false
 
     var body: some View {
@@ -42,8 +44,8 @@ struct SettingsView: View {
             Divider()
 
             // Scenario 1
-            Button("Open sheet") { showSheet = true }
-                .mbkSheet(isPresented: $showSheet, overlayGate: overlayGate) {
+            Button("Open sheet") { appState.isSheetPresented = true }
+                .mbkSheet(isPresented: $appState.isSheetPresented, overlayGate: overlayGate) {
                     SheetView()
                         .environment(appState)
                         .environment(overlayGate)
