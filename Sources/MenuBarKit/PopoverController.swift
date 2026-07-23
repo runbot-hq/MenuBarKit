@@ -17,39 +17,38 @@
 //   On resize: anchorX (button.minX in screen coords) + anchorY are
 //   re-used to recompute origin from the new size.
 //
-// VISUAL CHROME:
-//   NSPanel(.borderless) has no chrome. We use NSGlassEffectView (macOS 26+,
-//   WWDC25 session 310) as the panel's contentView for the Tahoe liquid-glass
-//   material.
-//   - glass.contentView hosts the SwiftUI view (correct API; not addSubview)
-//   - glass.clipsToBounds = true clips cornerRadius correctly and survives
-//     addChildWindow() when a sheet is opened
-//   - glass.style = .regular for the standard Tahoe panel appearance
+// VISUAL CHROME — TWO-LAYER APPROACH:
+//   NSPanel(.borderless) has no chrome. We use two nested views:
+//
+//   1. Outer — NSVisualEffectView (material = .clear, blendingMode = .behindWindow)
+//      Set as panel.contentView. Its sole job is maskImage: the only clipping
+//      technique that survives addChildWindow() when a sheet is opened.
+//      material = .clear means it contributes no visual material of its own.
+//
+//   2. Inner — NSGlassEffectView (macOS 26+, WWDC25 session 310)
+//      Pinned to fill the outer view. Provides the Tahoe liquid-glass material.
+//      hostingController.view is assigned to its contentView property.
+//
+//   The outer maskImage clips the entire subtree — including the glass
+//   compositor — at the window server level, upstream of Core Animation.
+//   NSGlassEffectView.cornerRadius and clipsToBounds both use Core Animation
+//   and are reset by addChildWindow(); maskImage is not.
 //
 // ROUNDED CORNERS — HISTORY:
-//   Several approaches were tried before the correct one was found:
+//   Approaches tried and rejected:
+//   1. NSVisualEffectView.cornerRadius / masksToBounds: reset by addChildWindow()
+//   2. CAShapeLayer mask: clips pixels but not the blur compositor region
+//   3. NSGlassEffectView.cornerRadius alone: reset by addChildWindow()
+//   4. NSGlassEffectView.clipsToBounds: also reset by addChildWindow()
+//   5. NSVisualEffectView.maskImage wrapping NSGlassEffectView (CORRECT):
+//      maskImage is applied by the window server compositor, not Core Animation.
+//      It clips the full subtree including glass and survives addChildWindow().
 //
-//   1. layer.cornerRadius + masksToBounds on NSVisualEffectView:
-//      Goes square when addChildWindow() is called for sheets.
-//
-//   2. CAShapeLayer on layer.mask:
-//      Clips pixel content but not the blur compositor region.
-//
-//   3. NSVisualEffectView.maskImage with capInsets:
-//      Survives addChildWindow but does not produce liquid glass.
-//
-//   4. NSGlassEffectView.cornerRadius alone (no clipsToBounds):
-//      Goes square when addChildWindow() is called — same CA regression.
-//
-//   5. NSGlassEffectView + clipsToBounds = true (CORRECT):
-//      clipsToBounds clips at the compositor level above Core Animation,
-//      so it survives addChildWindow(). cornerRadius + clipsToBounds is
-//      the documented pattern for NSGlassEffectView on macOS 26.
+// CORNER RADIUS VALUE:
+//   20pt matches system status-bar panels (Weather, etc.) on macOS 26.
 //
 // SIZE CLAMPING:
 //   applyContentSize clamps preferredContentSize to [minWidth, maxWidth] x maxHeight.
-//   Content wider than maxWidth is clipped by lineLimit(1) + truncation in SwiftUI.
-//   Content taller than maxHeight is scrollable inside the ScrollView.
 //
 // SHEETS / OVERLAY GATE:
 //   MBKAnchoredSheet renders as an overlay inside the same NSHostingController.
@@ -159,7 +158,6 @@ public final class MBKPopoverController: NSObject {
         let buttonRectOnScreen = button.window?.convertToScreen(buttonRectInWindow)
             ?? NSRect(x: screen.frame.midX, y: screen.visibleFrame.maxY, width: 0, height: 0)
 
-        // Left-align panel to button's left edge, clamped within screen visible frame.
         anchorX = buttonRectOnScreen.minX
         anchorY = buttonRectOnScreen.minY
         mbkLog("PopoverController", "openPanel — anchor=(\(anchorX),\(anchorY))")
@@ -225,18 +223,45 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // NSGlassEffectView: correct Tahoe liquid-glass API (WWDC25 session 310).
-        // contentView is the documented way to embed content — not addSubview.
-        // clipsToBounds = true clips cornerRadius at the compositor level and
-        // survives addChildWindow() when a sheet is opened (see ROUNDED CORNERS).
-        let glassView = NSGlassEffectView()
-        glassView.cornerRadius = cornerRadius
-        glassView.style = .regular
-        glassView.clipsToBounds = true
-        glassView.contentView = hostingController.view
+        // Outer: NSVisualEffectView with maskImage — sole purpose is corner clipping
+        // that survives addChildWindow(). material=.clear, no visual contribution.
+        let clipView = NSVisualEffectView()
+        clipView.material = .windowBackground
+        clipView.blendingMode = .behindWindow
+        clipView.state = .active
+        clipView.wantsLayer = true
+        clipView.maskImage = roundedMaskImage(radius: cornerRadius)
 
-        panel.contentView = glassView
+        // Inner: NSGlassEffectView — provides Tahoe liquid-glass material.
+        // contentView is the documented embedding API (not addSubview).
+        let glassView = NSGlassEffectView()
+        glassView.style = .regular
+        glassView.contentView = hostingController.view
+        glassView.translatesAutoresizingMaskIntoConstraints = false
+        clipView.addSubview(glassView)
+        NSLayoutConstraint.activate([
+            glassView.topAnchor.constraint(equalTo: clipView.topAnchor),
+            glassView.bottomAnchor.constraint(equalTo: clipView.bottomAnchor),
+            glassView.leadingAnchor.constraint(equalTo: clipView.leadingAnchor),
+            glassView.trailingAnchor.constraint(equalTo: clipView.trailingAnchor),
+        ])
+
+        panel.contentView = clipView
         mbkLog("PopoverController", "setupPanel — initialSize=(\(initialSize.width),\(initialSize.height))")
+    }
+
+    /// Rounded-rect maskImage for NSVisualEffectView.
+    /// capInsets let it stretch to any size without regenerating.
+    private func roundedMaskImage(radius: CGFloat) -> NSImage {
+        let size = NSSize(width: radius * 2 + 1, height: radius * 2 + 1)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.black.set()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
     }
 
     private func clamp(_ size: CGSize) -> CGSize {
