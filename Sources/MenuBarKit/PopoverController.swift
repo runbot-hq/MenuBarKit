@@ -38,7 +38,8 @@ public final class MBKPopoverController: NSObject {
         self.minWidth = minWidth
         self.maxWidth = maxWidth
         self.maxHeight = maxHeight
-        self.pendingRootView = AnyView(rootView)
+        // Wrap the caller's view in the glass+tint container.
+        self.pendingRootView = AnyView(MBKGlassPanelView(content: rootView))
     }
 
     private var pendingRootView: AnyView
@@ -104,7 +105,7 @@ public final class MBKPopoverController: NSObject {
 
         panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: initialSize),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -113,24 +114,11 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        let glassView = NSGlassEffectView(frame: NSRect(origin: .zero, size: initialSize))
-        glassView.cornerRadius = 12
-        glassView.autoresizingMask = [.width, .height]
-        // Darken the glass surface. Increase alpha toward 1.0 for more darkness.
-        glassView.tintColor = NSColor.black.withAlphaComponent(0.35)
-
+        // SwiftUI owns the glass surface via .glassEffect — no NSGlassEffectView needed.
         let hostingView = hostingController.view
-        hostingView.translatesAutoresizingMaskIntoConstraints = false
-        glassView.contentView = hostingView
-
-        NSLayoutConstraint.activate([
-            hostingView.leadingAnchor.constraint(equalTo: glassView.leadingAnchor),
-            hostingView.trailingAnchor.constraint(equalTo: glassView.trailingAnchor),
-            hostingView.topAnchor.constraint(equalTo: glassView.topAnchor),
-            hostingView.bottomAnchor.constraint(equalTo: glassView.bottomAnchor),
-        ])
-
-        panel.contentView = glassView
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = .clear
+        panel.contentView = hostingView
 
         mbkLog("PopoverController", "setup complete")
     }
