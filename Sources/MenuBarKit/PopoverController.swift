@@ -17,7 +17,7 @@
 //   On resize: anchorX (button.minX in screen coords) + anchorY are
 //   re-used to recompute origin from the new size.
 //
-// ┌─────────────────────────────────────────────────────────────────────────┐
+// ┌──────────────────────────────────────────────────────────────────────────┐
 // │  !! DO NOT TOUCH — ROUNDED CORNER SYSTEM !!                            │
 // │                                                                         │
 // │  Rounded corners survive addChildWindow() ONLY because of the exact     │
@@ -42,17 +42,21 @@
 // │    • clipView.maskImage = roundedMaskImage(radius: cornerRadius)         │
 // │    • roundedMaskImage() using NSBezierPath + capInsets + .stretch        │
 // │    • NSGlassEffectView pinned inside clipView via Auto Layout            │
-// └─────────────────────────────────────────────────────────────────────────┘
+// └──────────────────────────────────────────────────────────────────────────┘
 //
 // VISUAL CHROME — TWO-LAYER APPROACH:
 //   NSPanel(.borderless) has no chrome. We use two nested views:
 //
 //   1. Outer — NSVisualEffectView (clipView)
 //      Set as panel.contentView. Its ONLY job is maskImage corner clipping.
-//      material = .clear so the VEV contributes ZERO compositor content —
-//      glass refracts straight through to the desktop. Any other material
-//      (e.g. .windowBackground) renders its own dark vibrancy layer that
-//      the glass composites on top of, killing the live glass look.
+//      blendingMode = .withinWindow is REQUIRED. With .withinWindow there is
+//      nothing behind the VEV in the window's own layer tree, so it renders
+//      as fully transparent — zero compositor content contributed.
+//      Using .behindWindow causes the VEV to render its own dark vibrancy
+//      layer that the glass then composites on top of, making the panel
+//      look grey/dark instead of live liquid glass.
+//      material is left at its default (.appearanceBased) — it has no effect
+//      when blendingMode = .withinWindow and there is no backing content.
 //
 //   2. Inner — NSGlassEffectView
 //      Pinned to fill clipView. Provides the Tahoe liquid-glass material.
@@ -68,6 +72,8 @@
 //   6. DispatchQueue.main.async re-assertion            → still a race, still regresses
 //   7. NSVisualEffectView.maskImage wrapping NSGlassEffectView — WORKS. (current approach)
 //   8. maskImage on NSGlassEffectView directly          → COMPILE ERROR: no maskImage property
+//   9. clipView.material = .clear                       → COMPILE ERROR: no such member
+//  10. clipView.blendingMode = .behindWindow            → VEV renders dark vibrancy, grey panel
 //
 // CORNER RADIUS VALUE:
 //   20pt matches system status-bar panels (Weather, etc.) on macOS 26.
@@ -253,22 +259,20 @@ public final class MBKPopoverController: NSObject {
         // maskImage is the sole clipping technique that survives addChildWindow()
         // when a sheet is presented. See ROUNDED CORNERS — HISTORY in the file header.
         //
-        // material = .clear is REQUIRED — any other material renders its own
-        // vibrancy/blur content that the glass composites on top of, making the
-        // panel look grey/dark instead of live liquid glass.
+        // blendingMode = .withinWindow is REQUIRED — see file header for explanation.
+        // Do NOT change blendingMode to .behindWindow (renders dark vibrancy under glass).
         //
         // Rules:
         //   • clipView MUST be panel.contentView — do not add any wrapper above it.
         //   • clipView.maskImage MUST be set to roundedMaskImage() — do not remove it.
-        //   • clipView.material MUST stay .clear — do not change it.
+        //   • clipView.blendingMode MUST stay .withinWindow — do not change it.
         //   • Do NOT set cornerRadius, masksToBounds, or wantsLayer=false on clipView.
         //   • Do NOT replace clipView with any other view type.
         //   • Do NOT make NSGlassEffectView the direct panel.contentView.
         //   • NSGlassEffectView has NO maskImage property — do not attempt to set one.
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         let clipView = NSVisualEffectView()
-        clipView.material = .clear          // ← MUST be .clear — see above
-        clipView.blendingMode = .behindWindow
+        clipView.blendingMode = .withinWindow  // ← MUST be .withinWindow — see above
         clipView.state = .active
         clipView.wantsLayer = true
         clipView.maskImage = roundedMaskImage(radius: cornerRadius) // ← DO NOT REMOVE
