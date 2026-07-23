@@ -32,12 +32,19 @@
 //   in the callback keeps everything synchronous on the main thread.
 //
 // WHY notification.object IS EXTRACTED BEFORE assumeIsolated:
-//   The NotificationCenter closure parameter `notification` is typed as
-//   non-Sendable. Capturing it inside the assumeIsolated closure would cross
-//   an isolation boundary with a non-Sendable value, triggering SE-0430
-//   sending diagnostics. Extracting `notification.object as? NSWindow` before
-//   the assumeIsolated call captures only the NSWindow pointer, which AppKit
-//   guarantees is main-thread-safe for identity checks.
+//   The NotificationCenter closure parameter `notification` is non-Sendable.
+//   Capturing it inside assumeIsolated crosses an isolation boundary with a
+//   non-Sendable value (SE-0430). Extracting `notification.object as? NSWindow`
+//   before the assumeIsolated call captures only the NSWindow pointer.
+//
+// WHY Task { @MainActor } ON THE newValue==true BRANCH:
+//   onChange fires synchronously during session restore before SwiftUI has
+//   had a chance to present the sheet window. The Task hop gives SwiftUI one
+//   runloop cycle to settle so the sheet window exists by the time the
+//   observer is registered. Without this, on restore the observer never fires
+//   (no sheet window appears), the gate stays true permanently, and the file
+//   picker is blocked. This Task does NOT cause the addChildWindow timing bug —
+//   that was caused by withCheckedContinuation, which is now gone.
 //
 // CANCELLATION PATH:
 //   cancel() removes the observer and sets cancelled = true, preventing a
@@ -179,16 +186,21 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
             .onChange(of: isPresented) { _, newValue in
                 overlayGate.hasActiveOverlay = newValue
                 if newValue {
-                    guard let popoverWindow = NSApp.windows.first(where: {
-                        $0.styleMask.contains(.nonactivatingPanel)
-                    }) else {
-                        mbkLog("AnchoredSheet", "no nonactivatingPanel window — sheet will not be anchored")
-                        return
+                    // Task hop gives SwiftUI one runloop cycle to present the
+                    // sheet window before the observer is registered. Required
+                    // for session restore where onChange fires before the window exists.
+                    Task { @MainActor in
+                        guard let popoverWindow = NSApp.windows.first(where: {
+                            $0.styleMask.contains(.nonactivatingPanel)
+                        }) else {
+                            mbkLog("AnchoredSheet", "no nonactivatingPanel window — sheet will not be anchored")
+                            return
+                        }
+                        anchorTask = mbkWaitAndAnchorSheetWindow(
+                            popoverWindow: popoverWindow,
+                            label: "isPresented"
+                        )
                     }
-                    anchorTask = mbkWaitAndAnchorSheetWindow(
-                        popoverWindow: popoverWindow,
-                        label: "isPresented"
-                    )
                 } else {
                     anchorTask?.cancel()
                     anchorTask = nil
@@ -216,16 +228,20 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
                 let isPresented = newValue != nil
                 overlayGate.hasActiveOverlay = isPresented
                 if isPresented {
-                    guard let popoverWindow = NSApp.windows.first(where: {
-                        $0.styleMask.contains(.nonactivatingPanel)
-                    }) else {
-                        mbkLog("AnchoredSheet[item]", "no nonactivatingPanel window — sheet will not be anchored")
-                        return
+                    // Task hop gives SwiftUI one runloop cycle to present the
+                    // sheet window before the observer is registered.
+                    Task { @MainActor in
+                        guard let popoverWindow = NSApp.windows.first(where: {
+                            $0.styleMask.contains(.nonactivatingPanel)
+                        }) else {
+                            mbkLog("AnchoredSheet[item]", "no nonactivatingPanel window — sheet will not be anchored")
+                            return
+                        }
+                        anchorTask = mbkWaitAndAnchorSheetWindow(
+                            popoverWindow: popoverWindow,
+                            label: "item"
+                        )
                     }
-                    anchorTask = mbkWaitAndAnchorSheetWindow(
-                        popoverWindow: popoverWindow,
-                        label: "item"
-                    )
                 } else {
                     anchorTask?.cancel()
                     anchorTask = nil
