@@ -54,6 +54,11 @@
 //      stretch correctly at any size without regenerating it.
 //      See: developer.apple.com/documentation/appkit/nsvisualeffectview/maskimage
 //
+// CORNER RADIUS VALUE:
+//   12pt matches the native NSPopover corner radius (consistent across
+//   Sonoma / Sequoia / Tahoe for popovers). Tahoe's larger radii apply
+//   to regular app windows, not to popovers / menu-bar panels.
+//
 // SHEETS / OVERLAY GATE:
 //   MBKAnchoredSheet renders as an overlay inside the same NSHostingController.
 //   MBKOverlayGate blocks panel close while an overlay is active.
@@ -86,9 +91,9 @@ public final class MBKPopoverController: NSObject {
     /// Bottom edge of the status button in screen coordinates, captured at open time.
     private var anchorY: CGFloat = 0
 
-    /// Corner radius for the NSVisualEffectView maskImage.
-    /// See ROUNDED CORNERS in the file header.
-    private let cornerRadius: CGFloat = 10
+    /// Corner radius matching native NSPopover (12pt).
+    /// See CORNER RADIUS VALUE in the file header.
+    private let cornerRadius: CGFloat = 12
 
     // MARK: - Init
 
