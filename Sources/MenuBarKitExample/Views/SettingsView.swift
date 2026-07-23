@@ -7,17 +7,18 @@
 //   3 — Alert from popover level
 //   4 — Async scroll list (mimic run-bot SettingsView runner rows)
 //
-// Width is fixed (320); ScrollView drives height only.
+// Width is fixed (320); height uncapped so GeometryReader fires onChange.
 
 import MenuBarKit
 import SwiftUI
+import AppKit
 
 struct SettingsView: View {
     @Environment(AppState.self) private var appState
     @Environment(MBKOverlayGate.self) private var overlayGate
     @State private var showSheet = false
 
-    private var scrollMaxHeight: CGFloat {
+    private var maxHeight: CGFloat {
         (NSScreen.main?.visibleFrame.height ?? 800) * 0.80
     }
 
@@ -34,7 +35,7 @@ struct SettingsView: View {
 
             Divider()
 
-            // Async-loaded runner list
+            // Async-loaded runner list — uncapped
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 0) {
                     if appState.settingsItems.isEmpty {
@@ -58,19 +59,16 @@ struct SettingsView: View {
                 }
                 .padding(.vertical, 4)
             }
-            .frame(maxHeight: scrollMaxHeight)
 
             Divider()
 
             // Controls
             VStack(alignment: .leading, spacing: 8) {
-                // Scenario 1
                 Button("Open sheet") { showSheet = true }
                     .mbkSheet(isPresented: $showSheet, overlayGate: overlayGate) {
                         SheetView()
                     }
 
-                // Scenario 2
                 Button("Pick folder (popover)") {
                     mbkOpenFilePicker(target: .popover, overlayGate: overlayGate) { url in
                         appState.pickedURL = url
@@ -80,7 +78,6 @@ struct SettingsView: View {
                     Text(url.lastPathComponent).font(.caption).foregroundStyle(.secondary)
                 }
 
-                // Scenario 3
                 GroupBox("Alert from popover") {
                     Button("Show alert") { appState.showAlert = true }
                     Text("Alert should appear. Popover stays alive.")
@@ -98,9 +95,11 @@ struct SettingsView: View {
             .padding(.vertical, 8)
         }
         .frame(width: 320)
+        .frame(maxHeight: maxHeight)  // cap the whole VStack, not the ScrollView
         .fixedSize(horizontal: true, vertical: false)
         .onAppear {
             print("[SettingsView] onAppear")
+            guard appState.settingsItems.isEmpty else { return }  // cached — skip reload
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(800))
                 appState.settingsItems = [
@@ -111,10 +110,6 @@ struct SettingsView: View {
                     "runner-linux-03 (busy)",
                 ]
             }
-        }
-        .onDisappear {
-            print("[SettingsView] onDisappear")
-            appState.settingsItems = []
         }
     }
 }

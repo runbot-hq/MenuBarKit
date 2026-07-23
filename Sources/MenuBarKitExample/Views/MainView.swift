@@ -1,21 +1,22 @@
 // MainView.swift
 // MenuBarKitExample
 
+import AppKit
 import SwiftUI
 
 /// Landing view shown on first popover open. Navigates to SettingsView.
 ///
 /// SCROLL LIST — mimics run-bot's PanelMainView:
-/// Items start empty and async-load 0.8s after onAppear via a Task,
-/// exactly like run-bot's workflow rows arriving from @Observable AppState.
-/// The GeometryReader in PopoverController.setupPopover() must fire
-/// onChange as the ScrollView grows — this is the core scenario under test.
+/// Items async-load 0.8s after first onAppear (cached after that).
+/// The GeometryReader in PopoverController must fire onChange as the
+/// VStack grows — this is the core height-expansion scenario under test.
 ///
-/// Width is fixed (260); ScrollView drives height only.
+/// Width is fixed (260); height is uncapped so fittingSize reflects
+/// the full intrinsic height and GeometryReader fires onChange.
 struct MainView: View {
     @Environment(AppState.self) private var appState
 
-    private var scrollMaxHeight: CGFloat {
+    private var maxHeight: CGFloat {
         (NSScreen.main?.visibleFrame.height ?? 800) * 0.80
     }
 
@@ -34,7 +35,7 @@ struct MainView: View {
 
             Divider()
 
-            // Async-loaded scroll list
+            // Scroll list — uncapped so GeometryReader sees real growth
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 0) {
                     if appState.mainItems.isEmpty {
@@ -58,12 +59,13 @@ struct MainView: View {
                 }
                 .padding(.vertical, 4)
             }
-            .frame(maxHeight: scrollMaxHeight)
         }
         .frame(width: 260)
+        .frame(maxHeight: maxHeight)  // cap the whole VStack, not the ScrollView
         .fixedSize(horizontal: true, vertical: false)
         .onAppear {
             print("[MainView] onAppear")
+            guard appState.mainItems.isEmpty else { return }  // cached — skip reload
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(800))
                 appState.mainItems = [
@@ -75,10 +77,6 @@ struct MainView: View {
                     "deploy / production",
                 ]
             }
-        }
-        .onDisappear {
-            print("[MainView] onDisappear")
-            appState.mainItems = []
         }
     }
 }
