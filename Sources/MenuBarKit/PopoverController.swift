@@ -12,26 +12,17 @@
 //   applyContentSize calls panel.setFrame() — free resize, no re-anchor.
 //
 // POSITIONING MODEL:
-//   anchorX is captured ONCE at open time: button.midX in screen coords.
-//   On every resize, frame is recomputed from anchorX + new size:
-//     frame.origin.x = anchorX - size.width / 2
-//     frame.origin.y = buttonScreenMinY - size.height
-//   anchorX is never re-read from the button while the panel is open.
-//   This avoids the menu-bar auto-hide instability (button screen-Y
-//   changes between open/close cycles on auto-hide displays).
-//
-// WHY NOT NSPopover:
-//   NSPopover.contentSize re-anchors the popover window on every write
-//   while shown. There is no clean way to compensate for this — delta
-//   math + setFrameOrigin fights AppKit and produces side-jumps on any
-//   intermediate layout frame (e.g. SwiftUI emitting width before height
-//   on a route transition). NSPanel.setFrame() has no such constraint.
+//   On open: panel left edge aligns with the left edge of the status button,
+//   clamped so the panel never overflows the screen's visible frame.
+//   On resize: anchorX (button.minX in screen coords) + anchorY are
+//   re-used to recompute origin from the new size.
 //
 // VISUAL CHROME:
 //   NSPanel(.borderless) has no chrome. We add an NSVisualEffectView
-//   with .popover material as the panel's contentView, then embed
-//   the NSHostingController view inside it. This reproduces the standard
-//   macOS popover glass background + corner radius without NSPopover.
+//   with .hudWindow material as the panel's contentView, then embed
+//   the NSHostingController view inside it. .hudWindow gives the deep
+//   dark background used by modern menu-bar apps regardless of the
+//   system appearance.
 //
 // ROUNDED CORNERS — WHY maskImage, NOT cornerRadius/masksToBounds/CAShapeLayer:
 //   Three approaches were tried and rejected:
@@ -56,8 +47,7 @@
 //
 // CORNER RADIUS VALUE:
 //   12pt matches the native NSPopover corner radius (consistent across
-//   Sonoma / Sequoia / Tahoe for popovers). Tahoe's larger radii apply
-//   to regular app windows, not to popovers / menu-bar panels.
+//   Sonoma / Sequoia / Tahoe for popovers).
 //
 // SIZE CLAMPING:
 //   applyContentSize clamps preferredContentSize to [minWidth, maxWidth] x maxHeight.
@@ -67,7 +57,6 @@
 // SHEETS / OVERLAY GATE:
 //   MBKAnchoredSheet renders as an overlay inside the same NSHostingController.
 //   MBKOverlayGate blocks panel close while an overlay is active.
-//   Neither depends on NSPopover — both work identically with NSPanel.
 
 import AppKit
 import SwiftUI
@@ -80,11 +69,8 @@ public final class MBKPopoverController: NSObject {
     private let overlayGate: MBKOverlayGate
     private let symbolName: String
     private let initialSize: NSSize
-    /// Minimum width the panel will shrink to.
     private let minWidth: CGFloat
-    /// Maximum width the panel will grow to. SwiftUI content truncates beyond this.
     private let maxWidth: CGFloat
-    /// Maximum height the panel will grow to. Content taller than this scrolls.
     private let maxHeight: CGFloat
 
     // MARK: - Owned objects
@@ -97,13 +83,11 @@ public final class MBKPopoverController: NSObject {
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
-    /// X midpoint of the status button in screen coordinates, captured at open time.
+    /// Left edge of the status button in screen coordinates, captured at open time.
     private var anchorX: CGFloat = 0
     /// Bottom edge of the status button in screen coordinates, captured at open time.
     private var anchorY: CGFloat = 0
 
-    /// Corner radius matching native NSPopover (12pt).
-    /// See CORNER RADIUS VALUE in the file header.
     private let cornerRadius: CGFloat = 12
 
     // MARK: - Init
@@ -172,13 +156,17 @@ public final class MBKPopoverController: NSObject {
         let buttonRectInWindow = button.convert(button.bounds, to: nil)
         let buttonRectOnScreen = button.window?.convertToScreen(buttonRectInWindow)
             ?? NSRect(x: screen.frame.midX, y: screen.visibleFrame.maxY, width: 0, height: 0)
-        anchorX = buttonRectOnScreen.midX
+
+        // Left-align panel to button's left edge, clamped within screen visible frame.
+        anchorX = buttonRectOnScreen.minX
         anchorY = buttonRectOnScreen.minY
         mbkLog("PopoverController", "openPanel — anchor=(\(anchorX),\(anchorY))")
 
         let size = panel.frame.size
+        let rawX = anchorX
+        let clampedX = min(rawX, screen.visibleFrame.maxX - size.width)
         let origin = NSPoint(
-            x: anchorX - size.width / 2,
+            x: max(clampedX, screen.visibleFrame.minX),
             y: anchorY - size.height
         )
         panel.setFrameOrigin(origin)
@@ -234,16 +222,14 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // NSVisualEffectView provides the standard macOS popover glass background.
-        // Rounded corners via maskImage — see ROUNDED CORNERS in the file header.
+        // .hudWindow gives the deep dark background used by modern menu-bar apps.
         let visualEffect = NSVisualEffectView()
-        visualEffect.material = .popover
+        visualEffect.material = .hudWindow
         visualEffect.blendingMode = .behindWindow
         visualEffect.state = .active
         visualEffect.wantsLayer = true
         visualEffect.maskImage = roundedMaskImage(radius: cornerRadius)
 
-        // Embed the SwiftUI hosting view inside the visual effect view.
         let contentView = hostingController.view
         contentView.translatesAutoresizingMaskIntoConstraints = false
         visualEffect.addSubview(contentView)
@@ -258,10 +244,6 @@ public final class MBKPopoverController: NSObject {
         mbkLog("PopoverController", "setupPanel — initialSize=(\(initialSize.width),\(initialSize.height))")
     }
 
-    /// Builds the mask image used by NSVisualEffectView.maskImage.
-    /// The image is a minimal (2*radius+1) square with a filled rounded rect.
-    /// capInsets allow it to stretch to any panel size without regeneration.
-    /// See ROUNDED CORNERS in the file header.
     private func roundedMaskImage(radius: CGFloat) -> NSImage {
         let size = NSSize(width: radius * 2 + 1, height: radius * 2 + 1)
         let image = NSImage(size: size, flipped: false) { rect in
@@ -274,7 +256,6 @@ public final class MBKPopoverController: NSObject {
         return image
     }
 
-    /// Clamps a size within [minWidth, maxWidth] x [1, maxHeight].
     private func clamp(_ size: CGSize) -> CGSize {
         CGSize(
             width:  min(max(size.width,  minWidth), maxWidth),
@@ -282,9 +263,6 @@ public final class MBKPopoverController: NSObject {
         )
     }
 
-    /// Applies a new content size from SwiftUI's preferredContentSize KVO.
-    /// Clamps to [minWidth, maxWidth] x maxHeight, then recomputes the full
-    /// panel frame from anchorX/anchorY — no delta math.
     private func applyContentSize(_ preferred: CGSize) {
         let clamped = clamp(preferred)
         guard clamped.width > 0, clamped.height > 0 else {
