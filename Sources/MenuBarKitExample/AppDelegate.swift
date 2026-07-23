@@ -9,9 +9,13 @@
 // Nothing about popover lifecycle, monitors, or window management lives here.
 //
 // SESSION RESPAWN:
-//   onDidClose snapshots route + isSheetPresented into lastSession.
-//   onWillShow restores lastSession before show() so the popover
-//   reopens into the exact hierarchy it had when it closed.
+//   onDidClose       — snapshots state on normal close (no overlay active).
+//   onWillForceClose — snapshots state when an overlay is active at close time
+//                       (e.g. sheet open + outside click). Fires BEFORE the gate
+//                       is cleared and BEFORE isSheetPresented is reset, so the
+//                       snapshot correctly captures route=settings, sheet=true.
+//   onWillShow       — restores lastSession before show() so the popover
+//                       reopens into the exact hierarchy it had when it closed.
 
 import AppKit
 import MenuBarKit
@@ -35,11 +39,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         popoverController.setup()
 
+        // Normal close (no overlay active) — snapshot after close.
         popoverController.onDidClose = { [weak self] in
             guard let self else { return }
             lastSession = appState.saveSnapshot()
             print("[AppDelegate] session saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
         }
+
+        // Force-close (overlay active, e.g. sheet open + outside click) —
+        // snapshot BEFORE gate is cleared and BEFORE isSheetPresented resets.
+        popoverController.onWillForceClose = { [weak self] in
+            guard let self else { return }
+            lastSession = appState.saveSnapshot()
+            print("[AppDelegate] session force-saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
+        }
+
+        // Restore snapshot before show() so hierarchy respawns correctly.
         popoverController.onWillShow = { [weak self] in
             guard let self, let snap = lastSession else { return }
             appState.restoreSnapshot(snap)
