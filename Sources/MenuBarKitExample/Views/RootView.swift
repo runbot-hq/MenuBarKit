@@ -5,10 +5,6 @@ import SwiftUI
 
 /// Root container that switches between `MainView` and `SettingsView`
 /// based on `AppState.route`.
-///
-/// NOTE: do NOT add .id(appState.route) here.
-/// Glass is handled by NSGlassEffectView in PopoverController — no
-/// SwiftUI glass modifiers needed here.
 struct RootView: View {
     @Environment(AppState.self) private var appState
 
@@ -19,7 +15,7 @@ struct RootView: View {
             case .settings: SettingsView()
             }
         }
-        .background(.clear)
+        .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 12))
         .onAppear  { print("[RootView] onAppear  route=\(appState.route)") }
         .onDisappear { print("[RootView] onDisappear route=\(appState.route)") }
     }

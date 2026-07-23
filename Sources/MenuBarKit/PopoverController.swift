@@ -22,6 +22,7 @@ public final class MBKPopoverController: NSObject {
 
     private var anchorX: CGFloat = 0
     private var anchorY: CGFloat = 0
+    private var pendingRootView: AnyView
 
     public init<Content: View>(
         rootView: Content,
@@ -38,11 +39,9 @@ public final class MBKPopoverController: NSObject {
         self.minWidth = minWidth
         self.maxWidth = maxWidth
         self.maxHeight = maxHeight
-        // Wrap the caller's view in the glass+tint container.
-        self.pendingRootView = AnyView(MBKGlassPanelView(content: rootView))
+        // Pass the caller's view through directly — glass is applied by the caller.
+        self.pendingRootView = AnyView(rootView)
     }
-
-    private var pendingRootView: AnyView
 
     public func setup() {
         precondition(!isSetUp)
@@ -114,13 +113,10 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // SwiftUI owns the glass surface via .glassEffect — no NSGlassEffectView needed.
         let hostingView = hostingController.view
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = .clear
         panel.contentView = hostingView
-
-        mbkLog("PopoverController", "setup complete")
     }
 
     private func clamp(_ size: CGSize) -> CGSize {
