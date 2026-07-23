@@ -24,23 +24,24 @@
 //   so excluding it by identity is sufficient.
 //
 // WHY NO withCheckedContinuation:
-//   withCheckedContinuation suspends the calling Task and hands the resume
-//   closure to a Sendable (nonisolated) callback. That makes every access
-//   inside the closure — NSWindow.styleMask, self.finish() — a cross-actor
-//   call that Swift 6 dispatches asynchronously. The async hop means
-//   addChildWindow is called one runloop cycle too late — after the
-//   outside-click event monitor has already fired.
+//   withCheckedContinuation suspends the calling Task off @MainActor, making
+//   the resume closure nonisolated/Sendable. Every @MainActor access inside it
+//   (styleMask, finish()) becomes an async hop — addChildWindow fires one
+//   runloop cycle too late, after the outside-click event monitor fires.
+//   Direct observer registration on @MainActor + MainActor.assumeIsolated
+//   in the callback keeps everything synchronous on the main thread.
 //
-//   The correct Swift 6 pattern (per principles.md §18) is to register the
-//   observer directly on @MainActor and call addChildWindow synchronously
-//   inside the callback using MainActor.assumeIsolated. The observer is
-//   registered with queue: .main, so the callback is always on the main
-//   thread; assumeIsolated is a zero-cost static assertion of that fact.
+// WHY notification.object IS EXTRACTED BEFORE assumeIsolated:
+//   The NotificationCenter closure parameter `notification` is typed as
+//   non-Sendable. Capturing it inside the assumeIsolated closure would cross
+//   an isolation boundary with a non-Sendable value, triggering SE-0430
+//   sending diagnostics. Extracting `notification.object as? NSWindow` before
+//   the assumeIsolated call captures only the NSWindow pointer, which AppKit
+//   guarantees is main-thread-safe for identity checks.
 //
 // CANCELLATION PATH:
-//   cancel() removes the observer and sets cancelled = true. If the callback
-//   fires concurrently (impossible given queue: .main, but defensively handled)
-//   the cancelled flag suppresses the addChildWindow call.
+//   cancel() removes the observer and sets cancelled = true, preventing a
+//   late-firing callback from calling addChildWindow after dismiss.
 //
 // DISMISS-SAFETY:
 //   Gate is cleared in onChange(false) synchronously. addChildWindow removal
@@ -94,13 +95,13 @@ final class MBKSheetAnchorTask {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            // queue: .main guarantees we are on the main thread.
-            // assumeIsolated is a zero-cost static assertion of that fact —
-            // no actor hop, no async dispatch.
+            // Extract object before assumeIsolated — notification itself is
+            // non-Sendable and must not be captured across the isolation boundary.
+            let candidate = notification.object as? NSWindow
             MainActor.assumeIsolated {
                 guard let self, !self.cancelled else { return }
                 guard
-                    let window = notification.object as? NSWindow,
+                    let window = candidate,
                     window !== self.popoverWindow,
                     window.styleMask.contains(.borderless)
                 else { return }
