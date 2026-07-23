@@ -1,7 +1,6 @@
-// PopoverController.swift — DEBUG: NO VEV
-// NSGlassEffectView is panel.contentView directly.
-// Corners will break on sheet open — this is intentional for diagnosis.
-// If glass looks correct now, the VEV was the grey source.
+// PopoverController.swift — DEBUG: NO VEV, NO GLASS
+// hostingController.view is panel.contentView directly.
+// If panel is still grey, the hosting view itself is the grey source.
 import AppKit
 import SwiftUI
 
@@ -25,7 +24,6 @@ public final class MBKPopoverController: NSObject {
 
     private var anchorX: CGFloat = 0
     private var anchorY: CGFloat = 0
-    private let cornerRadius: CGFloat = 20
 
     public init<Content: View>(
         rootView: Content,
@@ -117,14 +115,13 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // DEBUG: NSGlassEffectView directly as panel.contentView — no VEV wrapper.
-        // This breaks rounded corners on sheet open but isolates whether VEV is the grey source.
-        let glassView = NSGlassEffectView()
-        glassView.style = .clear
-        glassView.contentView = hostingController.view
-        hostingController.view.wantsLayer = true
-        hostingController.view.layer?.backgroundColor = .clear
-        panel.contentView = glassView
+        // DEBUG: hostingController.view directly as panel.contentView.
+        // No NSGlassEffectView, no NSVisualEffectView.
+        // If still grey — the hosting view itself is the grey source.
+        let hostingView = hostingController.view
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = .clear
+        panel.contentView = hostingView
 
         mbkLog("PopoverController", "setup complete")
     }
