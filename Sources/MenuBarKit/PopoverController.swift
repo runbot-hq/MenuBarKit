@@ -11,25 +11,29 @@
 //   re-trigger that centering — the box just grows/shrinks from a fixed
 //   edge, desyncing visibly from the arrow.
 //
-//   FIX (current): after setting popover.contentSize, compensate for
-//   AppKit's grow-from-edge default by shifting the window origin by the
-//   size delta — NOT by recomputing origin from scratch:
-//     - dx = (newWidth - oldWidth) / 2  → shift origin.x left by dx
-//       so window.midX stays pinned to the same screen position.
-//     - dy = newHeight - oldHeight      → shift origin.y down by dy
-//       so window.maxY stays pinned (top edge stays touching the arrow).
-//   This works entirely in window-frame space and never mixes content
-//   size with chrome dimensions.
+//   FIX (current): after setting popover.contentSize, reposition the window
+//   to an absolute origin computed from the status bar button's screen frame:
+//     - anchorX  = button screen midX  (center of the status item)
+//     - anchorY  = button screen minY  (bottom edge of the menu bar)
+//     - origin.x = anchorX - window.frame.width / 2
+//     - origin.y = anchorY - window.frame.height
+//   This is a single absolute write with no delta state, no chrome constant,
+//   and no ordering dependency on when window.frame is read.
 //
-//   ❌ PRIOR ATTEMPT: set frame.size = contentSize, then recomputed
-//      frame.origin.x = anchorX - contentSize.width / 2. Wrong because
-//      anchorX = window.frame.midX includes chrome (shadow/border)
-//      but contentSize does not — mixing the two spaces shifted the
-//      window ~100pt left, placing it at the screen edge.
+//   WHY button.window IS SAFE HERE (unlike button screen coords at open time):
+//   button.window is the NSStatusBarWindow. Its frame is stable for the
+//   entire time the popover is open — macOS only moves it when the menu bar
+//   hides/shows, which cannot happen while a popover is visible. So reading
+//   button.window.frame inside applyContentSize is reliable.
 //
-//   ❌ EARLIER ATTEMPT: re-queried button screen coords on every resize.
-//      button.minY is NOT stable across sessions: macOS auto-hides the
-//      menu bar, changing button screen-Y between open/close cycles.
+//   ❌ PRIOR ATTEMPT: delta-based origin correction using chromeHeight.
+//      Fragile: required reading window.frame before mutating contentSize,
+//      and a cached chrome constant that drifted when fixedSize() caused
+//      SwiftUI to render beyond the clamped contentSize.
+//
+//   ❌ EARLIER ATTEMPT: re-queried button screen coords (convert to screen)
+//      on every resize. button.convert(bounds, to: nil) is NOT stable after
+//      show() — returns stale values once the popover window is live.
 //
 //   ❌ EARLIEST ATTEMPT: close() + show() on width change.
 //      Two WindowServer frames — visible lateral jump.
@@ -39,17 +43,6 @@
 //      NSPopover. Use GeometryReader + onChange (see setupPopover()).
 //
 //   ⚠️  NEVER call show() with a degenerate positioningRect.
-//
-//   ⚠️  CLAMP + fixedSize() GOTCHA:
-//      When maxHeight clamps contentSize but the root view has .fixedSize(),
-//      SwiftUI renders at its full intrinsic height (e.g. 637) even though
-//      contentSize is 600. window.frame.height reflects the true rendered
-//      height. Using popover.contentSize.height as the delta reference
-//      therefore produces a wrong dh, shifting origin.y by the overflow.
-//      FIX: derive actualCurrentH from window.frame using the chrome constant
-//      (chromeH = window.frame.height - popover.contentSize.height, measured
-//      lazily on the first applyContentSize call where the window exists and
-//      no clamp overflow has occurred yet), then dh = clamped.height - actualCurrentH.
 
 import AppKit
 import SwiftUI
@@ -76,13 +69,6 @@ public final class MBKPopoverController: NSObject {
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
-
-    /// Constant offset between window.frame.height and popover.contentSize.height
-    /// (AppKit chrome: shadow + border). Measured lazily on the first applyContentSize
-    /// call where both the window exists and no clamp overflow has occurred yet.
-    /// Used to derive the true rendered content height from window.frame on every
-    /// subsequent call. Reset to nil on close so it is re-measured on the next open.
-    private var chromeHeight: CGFloat?
 
     // MARK: - Init
 
@@ -201,55 +187,45 @@ public final class MBKPopoverController: NSObject {
         )
     }
 
-    /// Applies a new preferred content size, clamped to [minWidth, maxWidth] × maxHeight.
+    /// Applies a new preferred content size, clamped to [minWidth, maxWidth] × maxHeight,
+    /// then repositions the popover window to stay centered under the status bar button.
     ///
-    /// Sets popover.contentSize then corrects window origin by the size delta so
-    /// midX and maxY stay pinned under the menu bar arrow.
-    ///
-    /// Uses chromeHeight (measured lazily on the first call where the window is live)
-    /// to derive the true rendered content height from window.frame, avoiding the
-    /// stale-contentSize Y-drift bug that occurs when fixedSize() overflows a clamped
-    /// contentSize.
+    /// Origin is computed absolutely from button.window.frame (the NSStatusBarWindow),
+    /// which is stable for the entire duration the popover is open. No delta tracking,
+    /// no chrome constant, no ordering dependency on when window.frame is read.
     private func applyContentSize(_ preferred: CGSize) {
         let clamped = clamp(preferred)
         guard clamped.width > 0, clamped.height > 0 else { return }
 
-        let currentSize = popover.contentSize
+        guard abs(popover.contentSize.width - clamped.width) > 1
+           || abs(popover.contentSize.height - clamped.height) > 1 else {
+            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
+            return
+        }
 
-        guard popover.isShown, let window = hostingController.view.window else {
+        guard popover.isShown,
+              let popoverWindow = hostingController.view.window,
+              let buttonWindow = statusItem.button?.window else {
             popover.contentSize = clamped
             mbkLog("PopoverController", "applyContentSize — not shown, recorded (\(clamped.width),\(clamped.height))")
             return
         }
 
-        // Measure chrome once — on the first applyContentSize call where the window
-        // is live. At this point contentSize was just set in openPopover() from
-        // fittingSize, before any clamp overflow can occur, so the measurement is clean.
-        if chromeHeight == nil {
-            chromeHeight = window.frame.height - currentSize.height
-            mbkLog("PopoverController", "applyContentSize — chromeHeight measured: \(chromeHeight!)")
-        }
-        let actualCurrentH = window.frame.height - (chromeHeight ?? 0)
-
-        guard abs(currentSize.width - clamped.width) > 1
-           || abs(actualCurrentH - clamped.height) > 1 else {
-            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
-            return
-        }
-
-        let dw = clamped.width - currentSize.width
-        let dh = clamped.height - actualCurrentH
-
         mbkLog("PopoverController",
-               "applyContentSize — (\(currentSize.width),\(currentSize.height))→"
-               + "(\(clamped.width),\(clamped.height)) actualCurrentH=\(actualCurrentH) dw=\(dw) dh=\(dh)")
+               "applyContentSize — (\(popover.contentSize.width),\(popover.contentSize.height))→"
+               + "(\(clamped.width),\(clamped.height))")
 
         popover.contentSize = clamped
 
-        var newOrigin = window.frame.origin
-        newOrigin.x -= dw / 2
-        newOrigin.y -= dh
-        window.setFrameOrigin(newOrigin)
+        // Compute absolute origin from the status bar button's window frame.
+        // anchorX/anchorY are the screen-space point where the arrow should meet the menu bar.
+        let anchorX = buttonWindow.frame.midX
+        let anchorY = buttonWindow.frame.minY
+        let newOrigin = NSPoint(
+            x: anchorX - popoverWindow.frame.width / 2,
+            y: anchorY - popoverWindow.frame.height
+        )
+        popoverWindow.setFrameOrigin(newOrigin)
         mbkLog("PopoverController", "applyContentSize — origin set to \(newOrigin)")
     }
 
@@ -327,7 +303,6 @@ extension MBKPopoverController: NSPopoverDelegate {
         mbkLog("PopoverController", "popoverDidClose")
         setButtonHighlight(false)
         stopEventMonitor()
-        chromeHeight = nil
         overlayGate.hasActiveOverlay = false
         mbkLog("PopoverController", "overlay gate reset on close")
     }
