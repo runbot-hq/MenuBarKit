@@ -24,7 +24,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .environment(overlayGate),
             overlayGate: overlayGate,
             symbolName: "flask.fill",
-            contentSize: NSSize(width: 280, height: 200),
             minWidth: 200,
             maxWidth: 480,
             maxHeight: 600
