@@ -19,14 +19,38 @@
 //
 // VISUAL CHROME:
 //   NSPanel(.borderless) has no chrome. We use NSGlassEffectView (macOS 26+,
-//   WWDC25 session 310) as the panel's contentView. This is the correct API
-//   for the Tahoe liquid-glass material — NSVisualEffectView does not produce
-//   liquid glass regardless of material value.
-//   cornerRadius = 20 matches the system status-bar panels (Weather, etc.).
+//   WWDC25 session 310) as the panel's contentView for the Tahoe liquid-glass
+//   material. NSVisualEffectView does not produce liquid glass regardless of
+//   material value.
 //
-// ROUNDED CORNERS:
-//   NSGlassEffectView.cornerRadius handles corner clipping natively,
-//   upstream of the blur compositor. No maskImage needed.
+// ROUNDED CORNERS — WHY maskImage, NOT cornerRadius/masksToBounds/CAShapeLayer:
+//   Three approaches were tried and rejected:
+//
+//   1. layer.cornerRadius + masksToBounds:
+//      Works before a sheet opens. addChildWindow() causes macOS to switch
+//      the window to a security compositing mode — masksToBounds is no
+//      longer honoured and corners go square while the sheet is open.
+//
+//   2. CAShapeLayer on layer.mask:
+//      Clips the view's pixel content but NOT the NSVisualEffectView blur
+//      region. The blur/vibrancy composites outside the mask boundary,
+//      producing square blur edges regardless of the mask shape.
+//
+//   3. NSGlassEffectView.cornerRadius:
+//      Also uses Core Animation under the hood — same regression as (1).
+//      Goes square when addChildWindow() is called for a sheet.
+//
+//   4. NSGlassEffectView + maskImage with capInsets (CORRECT):
+//      maskImage is the Apple-documented API for rounding effect views.
+//      It is applied by the view's own compositor, upstream of both Core
+//      Animation and the window server, so it correctly clips the glass
+//      region AND survives addChildWindow. capInsets make the image
+//      stretch correctly at any size without regenerating it.
+//      NSGlassEffectView.cornerRadius is set to 0; all rounding via maskImage.
+//      See: developer.apple.com/documentation/appkit/nsvisualeffectview/maskimage
+//
+// CORNER RADIUS VALUE:
+//   20pt matches the system status-bar panels (Weather, etc.) on macOS 26.
 //
 // SIZE CLAMPING:
 //   applyContentSize clamps preferredContentSize to [minWidth, maxWidth] x maxHeight.
@@ -207,10 +231,14 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // NSGlassEffectView is the correct Tahoe liquid-glass API (WWDC25 session 310).
-        // cornerRadius clips the glass blur region natively — no maskImage needed.
+        // NSGlassEffectView provides the Tahoe liquid-glass material (WWDC25 session 310).
+        // cornerRadius is set to 0 — all rounding is handled via maskImage (see ROUNDED
+        // CORNERS in the file header). NSGlassEffectView.cornerRadius uses Core Animation
+        // and goes square when addChildWindow() is called for a sheet.
         let glassView = NSGlassEffectView()
-        glassView.cornerRadius = cornerRadius
+        glassView.cornerRadius = 0
+        glassView.wantsLayer = true
+        glassView.maskImage = roundedMaskImage(radius: cornerRadius)
 
         let contentView = hostingController.view
         contentView.translatesAutoresizingMaskIntoConstraints = false
@@ -224,6 +252,21 @@ public final class MBKPopoverController: NSObject {
 
         panel.contentView = glassView
         mbkLog("PopoverController", "setupPanel — initialSize=(\(initialSize.width),\(initialSize.height))")
+    }
+
+    /// Builds the rounded-rect mask image used by NSGlassEffectView.maskImage.
+    /// maskImage is the only rounding approach that survives addChildWindow()
+    /// — see ROUNDED CORNERS in the file header.
+    private func roundedMaskImage(radius: CGFloat) -> NSImage {
+        let size = NSSize(width: radius * 2 + 1, height: radius * 2 + 1)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.black.set()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
     }
 
     private func clamp(_ size: CGSize) -> CGSize {
