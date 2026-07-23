@@ -11,8 +11,6 @@
 //   After SwiftUI presents the sheet, observe NSWindow.didBecomeKeyNotification.
 //   When a borderless window that is not the popover window becomes key, wire it
 //   as a child of the popover window via addChildWindow(_:ordered:).
-//   This ties the gate and anchoring to the actual AppKit window lifecycle
-//   rather than to SwiftUI's binding state.
 //
 // GATE:
 //   MBKOverlayGate is read from the SwiftUI environment (@Environment).
@@ -20,21 +18,15 @@
 //   No overlayGate: parameter is needed at each call site.
 //
 // NOTIFICATION CLOSURE ISOLATION:
-//   NotificationCenter is registered with queue: .main, so the callback is
-//   guaranteed to execute on the main thread. Neither Notification nor AnyObject
-//   are Sendable, so a Task { @MainActor } hop is not legal here. Instead,
-//   MainActor.assumeIsolated {} is used to assert main-actor isolation
-//   synchronously inside the already-main-thread callback. This is the correct
-//   Swift 6 pattern for NotificationCenter + queue: .main.
+//   The observer is registered from @MainActor. NotificationCenter delivers
+//   with queue: .main, so the callback is already on the main thread.
+//   MainActor.assumeIsolated asserts this synchronously — no Task, no
+//   continuation, no isolation boundary crossing. Notification stays entirely
+//   within the nonisolated closure and is never sent anywhere.
 //
 // CANCELLATION PATH:
-//   If the sheet binding flips back to false before the window becomes key,
-//   the caller calls cancel() which resumes the continuation with nil and
-//   removes the observer. This prevents the continuation from leaking.
-//
-// DISMISS-SAFETY:
-//   Gate is cleared in onChange(false) synchronously. addChildWindow removal
-//   is handled by AppKit automatically when the child window closes.
+//   cancel() removes the observer and calls addChildWindow with nil guard.
+//   Safe to call after the window has already been found (observer already removed).
 //
 // WHY Item: Identifiable & Equatable (not just Identifiable):
 //   onChange(of:) requires Equatable so SwiftUI can diff old vs new values.
@@ -44,12 +36,68 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Module-level anchor helper
+// MARK: - Anchor task
 
-/// Waits for a borderless NSWindow (other than `popoverWindow`) to become key,
-/// then wires it as a child of `popoverWindow`.
-/// Returns a cancellable token — call `cancel()` if the sheet is dismissed
-/// before its window appeared.
+/// Observes NSWindow.didBecomeKeyNotification and wires the first matching
+/// borderless window as a child of `popoverWindow`.
+/// Call `cancel()` if the sheet is dismissed before its window appeared.
+@MainActor
+final class MBKSheetAnchorTask {
+    private let popoverWindow: NSWindow
+    private let label: String
+    private var observer: NSObjectProtocol?
+
+    init(popoverWindow: NSWindow, label: String) {
+        self.popoverWindow = popoverWindow
+        self.label = label
+    }
+
+    func start() {
+        // Capture only value types / identities in the closure to avoid
+        // sending non-Sendable reference types across isolation boundaries.
+        // The closure is nonisolated; MainActor.assumeIsolated is used to
+        // assert the main-thread guarantee that queue: .main provides.
+        let popoverWindow = self.popoverWindow
+        let label = self.label
+        observer = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // queue: .main guarantees we are on the main thread.
+            // MainActor.assumeIsolated asserts this without any isolation crossing.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard let window = NSApp.windows.first(where: {
+                    $0 !== popoverWindow && $0.styleMask.contains(.borderless) && $0.isKeyWindow
+                }) else { return }
+                self.finish(anchoring: window)
+            }
+            _ = label // silence capture warning
+        }
+    }
+
+    func cancel() {
+        removeObserver()
+        mbkLog("AnchoredSheet[\(label)]", "anchor cancelled")
+    }
+
+    private func finish(anchoring window: NSWindow) {
+        removeObserver()
+        mbkLog("AnchoredSheet[\(label)]", "addChildWindow")
+        popoverWindow.addChildWindow(window, ordered: .above)
+    }
+
+    private func removeObserver() {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+            self.observer = nil
+        }
+    }
+}
+
+// MARK: - Module-level factory
+
 @MainActor
 func mbkWaitAndAnchorSheetWindow(
     popoverWindow: NSWindow,
@@ -60,109 +108,35 @@ func mbkWaitAndAnchorSheetWindow(
     return task
 }
 
-/// Cancellable token returned by `mbkWaitAndAnchorSheetWindow`.
-@MainActor
-final class MBKSheetAnchorTask {
-    private let popoverWindow: NSWindow
-    private let label: String
-    private var observer: NSObjectProtocol?
-    private var continuation: CheckedContinuation<NSWindow?, Never>?
-    private var task: Task<Void, Never>?
-
-    init(popoverWindow: NSWindow, label: String) {
-        self.popoverWindow = popoverWindow
-        self.label = label
-    }
-
-    func start() {
-        task = Task { [weak self] in
-            guard let self else { return }
-            let window = await withCheckedContinuation { (cont: CheckedContinuation<NSWindow?, Never>) in
-                self.continuation = cont
-                let popoverWindow = self.popoverWindow
-                self.observer = NotificationCenter.default.addObserver(
-                    forName: NSWindow.didBecomeKeyNotification,
-                    object: nil,
-                    queue: .main
-                ) { [weak self] notification in
-                    // Registered with queue: .main — guaranteed on main thread.
-                    // Neither Notification nor AnyObject are Sendable so a Task hop
-                    // is illegal. MainActor.assumeIsolated asserts isolation
-                    // synchronously without crossing any isolation boundary.
-                    MainActor.assumeIsolated {
-                        guard
-                            let self,
-                            let window = notification.object as? NSWindow,
-                            window !== popoverWindow,
-                            window.styleMask.contains(.borderless)
-                        else { return }
-                        self.finish(with: window)
-                    }
-                }
-            }
-            guard let window else {
-                mbkLog("AnchoredSheet[\(self.label)]", "anchor cancelled — sheet dismissed before window became key")
-                return
-            }
-            mbkLog("AnchoredSheet[\(self.label)]", "addChildWindow")
-            self.popoverWindow.addChildWindow(window, ordered: .above)
-        }
-    }
-
-    /// Aborts the wait. Safe to call after the window has already been found (no-op).
-    func cancel() {
-        finish(with: nil)
-    }
-
-    private func finish(with window: NSWindow?) {
-        if let observer {
-            NotificationCenter.default.removeObserver(observer)
-            self.observer = nil
-        }
-        continuation?.resume(returning: window)
-        continuation = nil
-    }
-}
-
 // MARK: - View extension
 
 /// View extension providing `mbkSheet` modifiers for popover-anchored sheet presentation.
-/// Reads `MBKOverlayGate` from the SwiftUI environment — inject it at the root view
-/// via `.environment(overlayGate)` and no `overlayGate:` parameter is needed at call sites.
+/// Reads `MBKOverlayGate` from the SwiftUI environment — inject once at the root
+/// via `.environment(overlayGate)`; no `overlayGate:` parameter needed at call sites.
 public extension View {
 
-    /// Presents a sheet anchored as a child of the popover window so it
-    /// survives outside-clicks and stays visible when the popover loses focus.
+    /// Presents a sheet anchored as a child of the popover window.
     /// Reads `MBKOverlayGate` from the environment automatically.
     func mbkSheet<SheetContent: View>(
         isPresented: Binding<Bool>,
         @ViewBuilder content: @escaping () -> SheetContent
     ) -> some View {
-        modifier(MBKAnchoredSheetModifier(
-            isPresented: isPresented,
-            sheetContent: content
-        ))
+        modifier(MBKAnchoredSheetModifier(isPresented: isPresented, sheetContent: content))
     }
 
-    /// Presents a sheet anchored as a child of the popover window, driven by
-    /// an optional item binding — matching SwiftUI's `.sheet(item:)` API shape.
+    /// Presents a sheet anchored as a child of the popover window, driven by an optional item.
     /// Reads `MBKOverlayGate` from the environment automatically.
-    /// `Item` must conform to both `Identifiable` and `Equatable` — see file header.
+    /// `Item` must conform to `Identifiable & Equatable` — see file header.
     func mbkSheet<Item: Identifiable & Equatable, SheetContent: View>(
         item: Binding<Item?>,
         @ViewBuilder content: @escaping (Item) -> SheetContent
     ) -> some View {
-        modifier(MBKAnchoredSheetItemModifier(
-            item: item,
-            sheetContent: content
-        ))
+        modifier(MBKAnchoredSheetItemModifier(item: item, sheetContent: content))
     }
 }
 
 // MARK: - isPresented variant
 
-/// ViewModifier that anchors a SwiftUI sheet as a child window of the popover
-/// and manages `MBKOverlayGate` (read from environment) for the sheet's lifetime.
 public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
     @Binding public var isPresented: Bool
     public let sheetContent: () -> SheetContent
@@ -183,10 +157,7 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
                             mbkLog("AnchoredSheet", "no nonactivatingPanel window — sheet will not be anchored")
                             return
                         }
-                        anchorTask = mbkWaitAndAnchorSheetWindow(
-                            popoverWindow: popoverWindow,
-                            label: "isPresented"
-                        )
+                        anchorTask = mbkWaitAndAnchorSheetWindow(popoverWindow: popoverWindow, label: "isPresented")
                     }
                 } else {
                     anchorTask?.cancel()
@@ -198,9 +169,6 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
 
 // MARK: - item variant
 
-/// ViewModifier that anchors a SwiftUI `.sheet(item:)` as a child window of the
-/// popover and manages `MBKOverlayGate` (read from environment) for the sheet's lifetime.
-/// `Item` must conform to `Identifiable & Equatable` — see file header.
 public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, SheetContent: View>: ViewModifier {
     @Binding public var item: Item?
     public let sheetContent: (Item) -> SheetContent
@@ -222,10 +190,7 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
                             mbkLog("AnchoredSheet[item]", "no nonactivatingPanel window — sheet will not be anchored")
                             return
                         }
-                        anchorTask = mbkWaitAndAnchorSheetWindow(
-                            popoverWindow: popoverWindow,
-                            label: "item"
-                        )
+                        anchorTask = mbkWaitAndAnchorSheetWindow(popoverWindow: popoverWindow, label: "item")
                     }
                 } else {
                     anchorTask?.cancel()
