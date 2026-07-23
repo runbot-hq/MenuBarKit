@@ -1,8 +1,9 @@
 // MainView.swift
 // MenuBarKitExample
 //
-// ScrollView capped at 80% screen height — content drives popover height
-// via preferredContentSize KVO until the cap, then the list scrolls.
+// Demonstrates dynamic height growth via a "Show more" button.
+// preferredContentSize KVO in PopoverController picks up every height
+// change and resizes + recenters the popover automatically.
 // Width = 260 (narrower than Settings 320) exercises arrow-centering on nav.
 
 import AppKit
@@ -10,11 +11,18 @@ import SwiftUI
 
 struct MainView: View {
     @Environment(AppState.self) private var appState
+    @State private var visibleCount: Int = 4
 
-    /// Cap scroll area at 80% of visible screen height so the popover
-    /// never runs off screen on small displays.
     private var maxScrollHeight: CGFloat {
         (NSScreen.main?.visibleFrame.height ?? 800) * 0.80
+    }
+
+    private var visibleItems: [String] {
+        Array(appState.allMainItems.prefix(visibleCount))
+    }
+
+    private var remainingCount: Int {
+        appState.allMainItems.count - visibleCount
     }
 
     var body: some View {
@@ -35,12 +43,10 @@ struct MainView: View {
 
             Divider()
 
-            // Scrollable list — height grows with content up to maxScrollHeight,
-            // then scrolls. preferredContentSize KVO reports the capped height
-            // to PopoverController which resizes + recenters the popover.
+            // Scrollable list — grows with content up to maxScrollHeight.
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(appState.mainItems.enumerated()), id: \.offset) { _, item in
+                    ForEach(Array(visibleItems.enumerated()), id: \.offset) { _, item in
                         HStack {
                             Image(systemName: "checkmark.circle").foregroundStyle(.green)
                             Text(item).font(.caption)
@@ -50,12 +56,34 @@ struct MainView: View {
                         .padding(.vertical, 6)
                         Divider().padding(.leading, 12)
                     }
+
+                    // Show more button — only visible when items remain.
+                    if remainingCount > 0 {
+                        Button {
+                            let next = min(4, remainingCount)
+                            print("[MainView] show more tapped — revealing \(next) items")
+                            visibleCount += next
+                        } label: {
+                            HStack {
+                                Image(systemName: "chevron.down").font(.caption2)
+                                Text("Show \(min(4, remainingCount)) more…").font(.caption)
+                            }
+                            .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                    }
                 }
             }
             .frame(maxHeight: maxScrollHeight)
         }
         .frame(width: 260)
-        .onAppear { print("[MainView] onAppear items=\(appState.mainItems.count)") }
-        .onDisappear { print("[MainView] onDisappear") }
+        .onAppear {
+            print("[MainView] onAppear items=\(appState.allMainItems.count) visible=\(visibleCount)")
+        }
+        .onDisappear {
+            print("[MainView] onDisappear")
+        }
     }
 }

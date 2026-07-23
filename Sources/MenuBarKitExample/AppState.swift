@@ -24,16 +24,21 @@ final class AppState {
         didSet { print("[AppState] showSheetAlert: \(oldValue) → \(self.showSheetAlert)") }
     }
 
-    // Pre-populated so the list is visible immediately on first open.
-    // In run-bot these arrive async from @Observable state; the growth
-    // scenario is exercised by the settingsItems async load below.
-    var mainItems: [String] = [
+    // Full dataset — all items available immediately.
+    // MainView shows the first `visibleCount` and exposes a Show More button.
+    let allMainItems: [String] = [
         "build / test (ubuntu-latest)",
         "build / test (macos-latest)",
         "lint / swiftlint",
         "release / tag-and-publish",
         "deploy / staging",
         "deploy / production",
+        "security / codeql",
+        "security / dependency-review",
+        "notify / slack-on-failure",
+        "notify / slack-on-success",
+        "perf / benchmark",
+        "perf / size-check",
     ]
 
     // Empty at init — loaded async in SettingsView.onAppear to exercise
