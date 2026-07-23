@@ -71,7 +71,14 @@ public final class MBKPopoverController: NSObject {
 
     /// Called at the end of popoverDidClose, after all cleanup. Use to snapshot
     /// session state so it can be restored on the next open.
+    /// Only fires on normal close (no overlay active). For force-close, use onWillForceClose.
     public var onDidClose: (() -> Void)?
+
+    /// Called inside forceClose(), BEFORE the overlay gate is cleared and BEFORE
+    /// the popover closes. Use to snapshot session state when an overlay (sheet,
+    /// picker) is active at outside-click time — at this point isSheetPresented
+    /// is still true and route is still the correct value.
+    public var onWillForceClose: (() -> Void)?
 
     // MARK: - Owned objects
 
@@ -158,6 +165,16 @@ public final class MBKPopoverController: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         mbkLog("PopoverController", "popover shown")
         startEventMonitor()
+    }
+
+    /// Bypasses the overlay gate to force-close the popover together with any active overlay.
+    /// Fires onWillForceClose BEFORE clearing the gate or closing, so the host app can
+    /// snapshot state while isSheetPresented and route are still correct.
+    private func forceClose() {
+        mbkLog("PopoverController", "forceClose — snapshotting before teardown")
+        onWillForceClose?()
+        overlayGate.hasActiveOverlay = false
+        popover.performClose(nil)
     }
 
     /// Returns a positioningRect centered on the button, or nil if bounds are degenerate.
@@ -283,7 +300,13 @@ public final class MBKPopoverController: NSObject {
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.popover.performClose(nil)
+                guard let self else { return }
+                if overlayGate.hasActiveOverlay {
+                    mbkLog("PopoverController", "event monitor — overlay active, force-closing")
+                    forceClose()
+                } else {
+                    popover.performClose(nil)
+                }
             }
         }
         mbkLog("PopoverController", "event monitor started")
