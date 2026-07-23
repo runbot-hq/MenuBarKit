@@ -45,6 +45,23 @@
 //      NSPopover. Use GeometryReader + onChange (see setupPopover()).
 //
 //   ⚠️  NEVER call show() with a degenerate positioningRect.
+//
+// FORCE-CLOSE vs BLOCK:
+//   The overlay gate (hasActiveOverlay) covers three overlay types:
+//     1. Sheet       — child window of the popover window.
+//     2. File picker — NSOpenPanel, NOT a child window.
+//     3. Alert       — system modal, NOT a child window.
+//
+//   Outside-click (event monitor):
+//     Sheet overlays should force-close (snapshot + remove child + close).
+//     Picker/alert overlays should be left alone — the user is interacting
+//     with a system panel. Detected by checking for child windows on the
+//     popover window: child windows present → sheet → force-close;
+//     no child windows → picker/alert → ignore the outside click.
+//
+//   Workspace switch (workspace observer):
+//     Any active overlay blocks close, same as before. A workspace switch
+//     while a picker or alert is open should not close the popover.
 
 import AppKit
 import SwiftUI
@@ -75,8 +92,8 @@ public final class MBKPopoverController: NSObject {
     public var onDidClose: (() -> Void)?
 
     /// Called inside forceClose(), BEFORE the overlay gate is cleared and BEFORE
-    /// the popover closes. Use to snapshot session state when an overlay (sheet,
-    /// picker) is active at close time — at this point isSheetPresented is still
+    /// the popover closes. Use to snapshot session state when a sheet overlay is
+    /// active at outside-click time — at this point isSheetPresented is still
     /// true and route is still the correct value.
     public var onWillForceClose: (() -> Void)?
 
@@ -167,19 +184,15 @@ public final class MBKPopoverController: NSObject {
         startEventMonitor()
     }
 
-    /// Bypasses the overlay gate to force-close the popover together with any active overlay.
+    /// Bypasses the overlay gate to force-close the popover together with a sheet child window.
     /// Fires onWillForceClose BEFORE clearing the gate or closing, so the host app can
     /// snapshot state while isSheetPresented and route are still correct.
-    /// Removes any child sheet windows first so performClose is not swallowed by AppKit
+    /// Removes child windows first so performClose is not swallowed by AppKit
     /// when the sheet window holds focus.
     private func forceClose() {
         mbkLog("PopoverController", "forceClose — snapshotting before teardown")
         onWillForceClose?()
         overlayGate.hasActiveOverlay = false
-        // Remove child sheet windows before closing the popover.
-        // When the sheet is a child window and holds focus, performClose on the
-        // popover is swallowed by AppKit. Detaching and hiding the child first
-        // returns focus to the popover window so performClose proceeds normally.
         if let popoverWindow = hostingController.view.window {
             for child in (popoverWindow.childWindows ?? []) {
                 mbkLog("PopoverController", "forceClose — removing child window")
@@ -188,6 +201,14 @@ public final class MBKPopoverController: NSObject {
             }
         }
         popover.performClose(nil)
+    }
+
+    /// Returns true if the popover window currently has a sheet child window attached.
+    /// Used by the event monitor to distinguish sheet overlays (force-closeable)
+    /// from picker/alert overlays (should not be disturbed on outside-click).
+    private var hasSheetChildWindow: Bool {
+        guard let popoverWindow = hostingController.view.window else { return false }
+        return !(popoverWindow.childWindows ?? []).isEmpty
     }
 
     /// Returns a positioningRect centered on the button, or nil if bounds are degenerate.
@@ -241,15 +262,10 @@ public final class MBKPopoverController: NSObject {
 
     /// Applies a new preferred content size, clamped to [minWidth, maxWidth] × maxHeight,
     /// then repositions the window absolutely using the anchor captured in popoverWillShow.
-    ///
-    /// Origin is derived from anchorPoint (stable for the session) and the post-mutation
-    /// window frame dimensions — no delta tracking, no chrome constant.
     private func applyContentSize(_ preferred: CGSize) {
         let clamped = clamp(preferred)
         guard clamped.width > 0, clamped.height > 0 else { return }
 
-        // Threshold > 1 (not > 0) to ignore sub-pixel size noise SwiftUI emits
-        // during layout passes where the content hasn't meaningfully changed.
         guard abs(popover.contentSize.width - clamped.width) > 1
            || abs(popover.contentSize.height - clamped.height) > 1 else {
             mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
@@ -270,7 +286,6 @@ public final class MBKPopoverController: NSObject {
 
         popover.contentSize = clamped
 
-        // Read window frame after setting contentSize — dimensions now reflect new size.
         let newOrigin = NSPoint(
             x: anchor.x - window.frame.width / 2,
             y: anchor.y - window.frame.height
@@ -280,6 +295,8 @@ public final class MBKPopoverController: NSObject {
     }
 
     // MARK: - Workspace observer
+    // Blocks close for ALL overlay types (sheet, picker, alert) on workspace switch.
+    // A workspace switch while a system panel is open should never close the popover.
 
     private func setupWorkspaceObserver() {
         workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -295,18 +312,20 @@ public final class MBKPopoverController: NSObject {
                     mbkLog("PopoverController", "workspace observer — self-activation, ignoring")
                     return
                 }
-                if overlayGate.hasActiveOverlay {
-                    mbkLog("PopoverController", "workspace observer — overlay active, force-closing")
-                    forceClose()
-                } else {
-                    mbkLog("PopoverController", "workspace observer — other app active, closing")
-                    popover.performClose(nil)
+                guard !overlayGate.hasActiveOverlay else {
+                    mbkLog("PopoverController", "workspace observer — overlay active, keeping popover open")
+                    return
                 }
+                mbkLog("PopoverController", "workspace observer — other app active, closing")
+                self.popover.performClose(nil)
             }
         }
     }
 
     // MARK: - Event monitor
+    // Outside-click with sheet (child window) active → force-close.
+    // Outside-click with picker/alert active → ignore (user is in a system panel).
+    // Outside-click with no overlay → normal close.
 
     private func startEventMonitor() {
         guard eventMonitor == nil else { return }
@@ -316,8 +335,12 @@ public final class MBKPopoverController: NSObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if overlayGate.hasActiveOverlay {
-                    mbkLog("PopoverController", "event monitor — overlay active, force-closing")
-                    forceClose()
+                    if hasSheetChildWindow {
+                        mbkLog("PopoverController", "event monitor — sheet overlay, force-closing")
+                        forceClose()
+                    } else {
+                        mbkLog("PopoverController", "event monitor — picker/alert overlay, ignoring outside click")
+                    }
                 } else {
                     popover.performClose(nil)
                 }
