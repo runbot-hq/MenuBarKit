@@ -1,31 +1,22 @@
 // SettingsView.swift
 // MenuBarKitExample
-//
-// Exercises all scenarios:
-//   1 — Sheet anchors + blocks outside-click dismiss
-//   2 — File picker from popover level
-//   3 — Alert from popover level
-//   4 — Async scroll list (mimic run-bot SettingsView runner rows)
-//
-// Width is fixed (320); height uncapped so GeometryReader fires onChange.
 
+import AppKit
 import MenuBarKit
 import SwiftUI
-import AppKit
 
 struct SettingsView: View {
     @Environment(AppState.self) private var appState
     @Environment(MBKOverlayGate.self) private var overlayGate
     @State private var showSheet = false
 
-    private var maxHeight: CGFloat {
+    private var scrollMaxHeight: CGFloat {
         (NSScreen.main?.visibleFrame.height ?? 800) * 0.80
     }
 
     var body: some View {
         @Bindable var appState = appState
         VStack(alignment: .leading, spacing: 0) {
-            // Header
             HStack {
                 Text("Settings").font(.headline)
                 Spacer()
@@ -35,7 +26,6 @@ struct SettingsView: View {
 
             Divider()
 
-            // Async-loaded runner list — uncapped
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 0) {
                     if appState.settingsItems.isEmpty {
@@ -59,10 +49,10 @@ struct SettingsView: View {
                 }
                 .padding(.vertical, 4)
             }
+            .frame(maxHeight: scrollMaxHeight)  // cap here — VStack reports true intrinsic height
 
             Divider()
 
-            // Controls
             VStack(alignment: .leading, spacing: 8) {
                 Button("Open sheet") { showSheet = true }
                     .mbkSheet(isPresented: $showSheet, overlayGate: overlayGate) {
@@ -95,11 +85,10 @@ struct SettingsView: View {
             .padding(.vertical, 8)
         }
         .frame(width: 320)
-        .frame(maxHeight: maxHeight)  // cap the whole VStack, not the ScrollView
         .fixedSize(horizontal: true, vertical: false)
         .onAppear {
             print("[SettingsView] onAppear")
-            guard appState.settingsItems.isEmpty else { return }  // cached — skip reload
+            guard appState.settingsItems.isEmpty else { return }
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(800))
                 appState.settingsItems = [
