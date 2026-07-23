@@ -111,6 +111,20 @@
 //   does not need to diff values, it only needs to know whether item is nil.
 //   MBKAnchoredSheetItemModifier uses onChange to observe the full item so it
 //   can re-anchor on non-nil→non-nil identity swaps, which requires Equatable.
+//
+// ROUNDED CORNERS AFTER addChildWindow:
+//   Calling addChildWindow(_:ordered:) causes the window server to switch the
+//   parent window's compositing path. This drops the rounded-corner mask that
+//   macOS normally applies to NSPopover windows, making the popover appear with
+//   square corners while a sheet is open.
+//
+//   Fix: call invalidateShadow() on the popover window immediately after
+//   addChildWindow. This forces the compositor to re-evaluate the window's shape
+//   mask and redraws the rounded corners. setNeedsDisplay() on the content
+//   view's layer is added as a belt-and-suspenders backing-store refresh.
+//
+//   This is applied in anchorSheetWindow() in both the isPresented and item
+//   variants, immediately after the addChildWindow call.
 
 import AppKit
 import SwiftUI
@@ -222,6 +236,12 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
             }) {
                 mbkLog("AnchoredSheet", "addChildWindow")
                 popoverWindow.addChildWindow(sheetWindow, ordered: .above)
+                // Restore rounded corners — addChildWindow switches the compositor
+                // path and drops the NSPopover's native rounded-corner mask.
+                // invalidateShadow() forces the compositor to re-evaluate the
+                // window shape. See ROUNDED CORNERS AFTER addChildWindow in file header.
+                popoverWindow.invalidateShadow()
+                popoverWindow.contentView?.layer?.setNeedsDisplay()
             } else {
                 mbkLog("AnchoredSheet", "no borderless+key window found")
             }
@@ -297,6 +317,10 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
             }) {
                 mbkLog("AnchoredSheet[item]", "addChildWindow")
                 popoverWindow.addChildWindow(sheetWindow, ordered: .above)
+                // Restore rounded corners — see ROUNDED CORNERS AFTER addChildWindow
+                // in the file header.
+                popoverWindow.invalidateShadow()
+                popoverWindow.contentView?.layer?.setNeedsDisplay()
             } else {
                 mbkLog("AnchoredSheet[item]", "no borderless+key window found")
             }
