@@ -113,10 +113,8 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // NSGlassEffectView is the panel's contentView.
-        // SwiftUI hosting view goes inside glassView.contentView.
-        // The transparent panel lets the glass lens real screen content.
         let glassView = NSGlassEffectView(frame: NSRect(origin: .zero, size: initialSize))
+        glassView.material = .clear
         glassView.cornerRadius = 12
         glassView.autoresizingMask = [.width, .height]
 
