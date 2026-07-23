@@ -18,36 +18,15 @@
 //   re-used to recompute origin from the new size.
 //
 // VISUAL CHROME:
-//   NSPanel(.borderless) has no chrome. We add an NSVisualEffectView
-//   with the liquidGlass material (macOS 26+, raw value 33) as the
-//   panel's contentView. This produces the Tahoe liquid-glass look used
-//   by system menu-bar panels. The named symbol .liquidGlass is not yet
-//   in the Swift SDK; the raw value is stable.
+//   NSPanel(.borderless) has no chrome. We use NSGlassEffectView (macOS 26+,
+//   WWDC25 session 310) as the panel's contentView. This is the correct API
+//   for the Tahoe liquid-glass material — NSVisualEffectView does not produce
+//   liquid glass regardless of material value.
+//   cornerRadius = 20 matches the system status-bar panels (Weather, etc.).
 //
-// ROUNDED CORNERS — WHY maskImage, NOT cornerRadius/masksToBounds/CAShapeLayer:
-//   Three approaches were tried and rejected:
-//
-//   1. layer.cornerRadius + masksToBounds:
-//      Works before a sheet opens. addChildWindow() causes macOS to switch
-//      the window to a security compositing mode — masksToBounds is no
-//      longer honoured and corners go square while the sheet is open.
-//
-//   2. CAShapeLayer on layer.mask:
-//      Clips the view's pixel content but NOT the NSVisualEffectView blur
-//      region. The blur/vibrancy composites outside the mask boundary,
-//      producing square blur edges regardless of the mask shape.
-//
-//   3. NSVisualEffectView.maskImage with capInsets (CORRECT):
-//      maskImage is the Apple-documented API for rounding NSVisualEffectView.
-//      It is applied by the view's own compositor, upstream of both Core
-//      Animation and the window server, so it correctly clips the blur
-//      region AND survives addChildWindow. capInsets make the image
-//      stretch correctly at any size without regenerating it.
-//      See: developer.apple.com/documentation/appkit/nsvisualeffectview/maskimage
-//
-// CORNER RADIUS VALUE:
-//   12pt matches the native NSPopover corner radius (consistent across
-//   Sonoma / Sequoia / Tahoe for popovers).
+// ROUNDED CORNERS:
+//   NSGlassEffectView.cornerRadius handles corner clipping natively,
+//   upstream of the blur compositor. No maskImage needed.
 //
 // SIZE CLAMPING:
 //   applyContentSize clamps preferredContentSize to [minWidth, maxWidth] x maxHeight.
@@ -93,11 +72,7 @@ public final class MBKPopoverController: NSObject {
     /// Bottom edge of the status button in screen coordinates, captured at open time.
     private var anchorY: CGFloat = 0
 
-    private let cornerRadius: CGFloat = 12
-
-    // liquidGlass material raw value for macOS 26+.
-    // The named symbol .liquidGlass is not yet in the Swift SDK.
-    private let liquidGlassMaterial = NSVisualEffectView.Material(rawValue: 33)!
+    private let cornerRadius: CGFloat = 20
 
     // MARK: - Init
 
@@ -232,38 +207,23 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // liquidGlass material (raw value 33) — Tahoe liquid-glass look.
-        let visualEffect = NSVisualEffectView()
-        visualEffect.material = liquidGlassMaterial
-        visualEffect.blendingMode = .behindWindow
-        visualEffect.state = .active
-        visualEffect.wantsLayer = true
-        visualEffect.maskImage = roundedMaskImage(radius: cornerRadius)
+        // NSGlassEffectView is the correct Tahoe liquid-glass API (WWDC25 session 310).
+        // cornerRadius clips the glass blur region natively — no maskImage needed.
+        let glassView = NSGlassEffectView()
+        glassView.cornerRadius = cornerRadius
 
         let contentView = hostingController.view
         contentView.translatesAutoresizingMaskIntoConstraints = false
-        visualEffect.addSubview(contentView)
+        glassView.addSubview(contentView)
         NSLayoutConstraint.activate([
-            contentView.topAnchor.constraint(equalTo: visualEffect.topAnchor),
-            contentView.bottomAnchor.constraint(equalTo: visualEffect.bottomAnchor),
-            contentView.leadingAnchor.constraint(equalTo: visualEffect.leadingAnchor),
-            contentView.trailingAnchor.constraint(equalTo: visualEffect.trailingAnchor),
+            contentView.topAnchor.constraint(equalTo: glassView.topAnchor),
+            contentView.bottomAnchor.constraint(equalTo: glassView.bottomAnchor),
+            contentView.leadingAnchor.constraint(equalTo: glassView.leadingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: glassView.trailingAnchor),
         ])
 
-        panel.contentView = visualEffect
+        panel.contentView = glassView
         mbkLog("PopoverController", "setupPanel — initialSize=(\(initialSize.width),\(initialSize.height))")
-    }
-
-    private func roundedMaskImage(radius: CGFloat) -> NSImage {
-        let size = NSSize(width: radius * 2 + 1, height: radius * 2 + 1)
-        let image = NSImage(size: size, flipped: false) { rect in
-            NSColor.black.set()
-            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-            return true
-        }
-        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
-        image.resizingMode = .stretch
-        return image
     }
 
     private func clamp(_ size: CGSize) -> CGSize {
