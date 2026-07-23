@@ -76,8 +76,8 @@ public final class MBKPopoverController: NSObject {
 
     /// Called inside forceClose(), BEFORE the overlay gate is cleared and BEFORE
     /// the popover closes. Use to snapshot session state when an overlay (sheet,
-    /// picker) is active at outside-click time — at this point isSheetPresented
-    /// is still true and route is still the correct value.
+    /// picker) is active at close time — at this point isSheetPresented is still
+    /// true and route is still the correct value.
     public var onWillForceClose: (() -> Void)?
 
     // MARK: - Owned objects
@@ -282,12 +282,13 @@ public final class MBKPopoverController: NSObject {
                     mbkLog("PopoverController", "workspace observer — self-activation, ignoring")
                     return
                 }
-                guard !overlayGate.hasActiveOverlay else {
-                    mbkLog("PopoverController", "workspace observer — overlay active, keeping popover open")
-                    return
+                if overlayGate.hasActiveOverlay {
+                    mbkLog("PopoverController", "workspace observer — overlay active, force-closing")
+                    forceClose()
+                } else {
+                    mbkLog("PopoverController", "workspace observer — other app active, closing")
+                    popover.performClose(nil)
                 }
-                mbkLog("PopoverController", "workspace observer — other app active, closing")
-                self.popover.performClose(nil)
             }
         }
     }
