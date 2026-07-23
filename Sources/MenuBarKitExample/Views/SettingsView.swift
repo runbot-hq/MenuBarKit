@@ -1,122 +1,81 @@
 // SettingsView.swift
 // MenuBarKitExample
 //
-// Exercises all scenarios:
-//   1 — Sheet anchors + blocks outside-click dismiss
-//   2 — File picker from popover level
-//   3 — Alert from popover level
-//   4 — Async scroll list (mimic run-bot SettingsView with runner list)
+// Exercises all three scenarios:
 //
-// WIDTH CONTRACT (matches PanelMainView):
-//   .frame(width: 320).fixedSize(horizontal: true, vertical: false)
-//   Width is fixed; ScrollView drives height.
+//   Scenario 1 — Sheet anchors + blocks outside-click dismiss
+//   Scenario 2 — File picker from popover level
+//   Scenario 3 — Alert from popover level
+//
+// Width is now driven by content (no fixed .frame(width:)) so the popover
+// resizes horizontally based on whatever is visible. The "Show wide row"
+// toggle reveals a wide element, forcing a horizontal resize — this
+// exercises the delta-based centering fix with UI-driven width changes.
 
 import MenuBarKit
 import SwiftUI
 
+/// Settings view that exercises the sheet-anchoring, file-picker, alert,
+/// and content-driven width-change scenarios.
 struct SettingsView: View {
     @Environment(AppState.self) private var appState
     @Environment(MBKOverlayGate.self) private var overlayGate
     @State private var showSheet = false
-
-    private var scrollMaxHeight: CGFloat {
-        (NSScreen.main?.visibleFrame.height ?? 800) * 0.80
-    }
+    @State private var showWideRow = false
 
     var body: some View {
         @Bindable var appState = appState
-        VStack(alignment: .leading, spacing: 0) {
-            // Header
-            HStack {
-                Text("Settings").font(.headline)
-                Spacer()
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Settings").font(.headline).frame(maxWidth: .infinity, alignment: .center)
+            Divider()
+
+            // Width driver: toggle reveals a wide fixed-width label.
+            // The VStack will widen to fit it, driving a horizontal resize.
+            Toggle("Show wide row", isOn: $showWideRow)
+            if showWideRow {
+                Text("← this row is intentionally wide to drive a horizontal resize →")
+                    .font(.system(size: 11, design: .monospaced))
+                    .fixedSize()          // prevent wrapping — must report full intrinsic width
+                    .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
 
             Divider()
 
-            // Async-loaded runner list — mirrors run-bot's local runner rows
-            ScrollView(.vertical, showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 0) {
-                    if appState.settingsItems.isEmpty {
-                        Text("Loading runners…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                    } else {
-                        ForEach(appState.settingsItems, id: \.self) { item in
-                            HStack {
-                                Image(systemName: "server.rack")
-                                    .foregroundStyle(.blue)
-                                Text(item)
-                                    .font(.caption)
-                                Spacer()
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            Divider().padding(.leading, 12)
-                        }
-                    }
+            // Scenario 1
+            Button("Open sheet") { showSheet = true }
+                .mbkSheet(isPresented: $showSheet, overlayGate: overlayGate) {
+                    SheetView()
                 }
-                .padding(.vertical, 4)
+
+            // Scenario 2
+            Button("Pick folder (popover)") {
+                mbkOpenFilePicker(target: .popover, overlayGate: overlayGate) { url in
+                    appState.pickedURL = url
+                }
             }
-            .frame(maxHeight: scrollMaxHeight)
+            if let url = appState.pickedURL {
+                Text(url.lastPathComponent).font(.caption).foregroundStyle(.secondary)
+            }
+
+            // Scenario 3
+            GroupBox("Alert from popover") {
+                Button("Show alert") { appState.showAlert = true }
+                Text("Alert should appear. Popover stays alive.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .mbkAlert("Test Alert", isPresented: $appState.showAlert, overlayGate: overlayGate) {
+                Button("OK", role: .cancel) { appState.showAlert = false }
+            } message: {
+                Text("Popover must stay open.")
+            }
 
             Divider()
-
-            // Controls section
-            VStack(alignment: .leading, spacing: 8) {
-                // Scenario 1
-                Button("Open sheet") { showSheet = true }
-                    .mbkSheet(isPresented: $showSheet, overlayGate: overlayGate) {
-                        SheetView()
-                    }
-
-                // Scenario 2
-                Button("Pick folder (popover)") {
-                    mbkOpenFilePicker(target: .popover, overlayGate: overlayGate) { url in
-                        appState.pickedURL = url
-                    }
-                }
-                if let url = appState.pickedURL {
-                    Text(url.lastPathComponent).font(.caption).foregroundStyle(.secondary)
-                }
-
-                // Scenario 3
-                GroupBox("Alert from popover") {
-                    Button("Show alert") { appState.showAlert = true }
-                    Text("Alert should appear. Popover stays alive.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .mbkAlert("Test Alert", isPresented: $appState.showAlert, overlayGate: overlayGate) {
-                    Button("OK", role: .cancel) { appState.showAlert = false }
-                } message: {
-                    Text("Popover must stay open.")
-                }
-
-                Button("← Back") { appState.route = .main }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            Button("← Back") { appState.route = .main }
+                .frame(maxWidth: .infinity, alignment: .center)
         }
-        .frame(width: 320)
-        .fixedSize(horizontal: true, vertical: false)
-        .onAppear {
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(800))
-                appState.settingsItems = [
-                    "runner-mac-01 (idle)",
-                    "runner-mac-02 (busy)",
-                    "runner-linux-01 (idle)",
-                    "runner-linux-02 (idle)",
-                    "runner-linux-03 (busy)",
-                ]
-            }
-        }
-        .onDisappear {
-            appState.settingsItems = []
-        }
+        .padding(16)
+        .fixedSize()   // let VStack report its intrinsic size to fittingSize
+        .onAppear    { print("[SettingsView] onAppear") }
+        .onDisappear { print("[SettingsView] onDisappear") }
     }
 }
