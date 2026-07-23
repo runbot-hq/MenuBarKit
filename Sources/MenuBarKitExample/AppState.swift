@@ -16,6 +16,7 @@ enum AppRoute {
 final class AppState {
     var route: AppRoute = .main
     var pickedURL: URL?
+    var sheetPickedURL: URL?
     var showAlert: Bool = false
     var showSheetAlert: Bool = false
 
