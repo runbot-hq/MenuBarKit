@@ -6,6 +6,11 @@ import SwiftUI
 /// Root container that switches between `MainView` and `SettingsView`
 /// based on `AppState.route`.
 ///
+/// Glass is applied here via GlassEffectContainer + .glassEffect(.clear).
+/// The panel behind this view is fully transparent (isOpaque=false,
+/// backgroundColor=.clear), so the system compositor samples real screen
+/// content — wallpaper, windows — giving the correct liquid glass look.
+///
 /// NOTE: do NOT add .id(appState.route) here.
 /// .id() forces SwiftUI to emit a transitional size event with the new
 /// route's width but the old route's height (e.g. 320×369 when going
@@ -19,13 +24,16 @@ struct RootView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        Group {
-            switch appState.route {
-            case .main:     MainView()
-            case .settings: SettingsView()
+        GlassEffectContainer {
+            Group {
+                switch appState.route {
+                case .main:     MainView()
+                case .settings: SettingsView()
+                }
             }
+            .glassEffect(.regular.interactive(true), in: RoundedRectangle(cornerRadius: 12))
         }
-        .background(.clear) // ← nuke any opaque default bg on the Group
+        .background(.clear)
         .background(
             GeometryReader { geo in
                 Color.clear
