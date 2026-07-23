@@ -13,10 +13,10 @@
 //
 //   FIX (current): capture the popover window's anchor point once in
 //   popoverWillShow, then reposition absolutely on every applyContentSize:
-//     - anchorMidX  = popoverWindow.frame.midX   (horizontal center)
-//     - anchorMaxY  = popoverWindow.frame.maxY   (top edge, touches menu bar)
-//     - origin.x    = anchorMidX - popoverWindow.frame.width / 2
-//     - origin.y    = anchorMaxY - popoverWindow.frame.height
+//     - anchorPoint.x = popoverWindow.frame.midX   (horizontal center)
+//     - anchorPoint.y = popoverWindow.frame.maxY   (top edge, touches menu bar)
+//     - origin.x      = anchorPoint.x - popoverWindow.frame.width / 2
+//     - origin.y      = anchorPoint.y - popoverWindow.frame.height
 //   Both frame dimensions are read after setting contentSize so they reflect
 //   the new window size. No delta tracking, no chrome constant, no ordering
 //   dependency on when window.frame is read.
@@ -72,17 +72,12 @@ public final class MBKPopoverController: NSObject {
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
-    /// Horizontal center of the popover window at open time (screen coords).
-    /// Captured once in popoverWillShow when the window position is authoritative.
-    /// Used to keep the arrow horizontally centered during content size changes.
-    /// Reset to nil on close.
-    private var anchorMidX: CGFloat?
-
-    /// Top edge of the popover window at open time (screen coords).
-    /// Captured once in popoverWillShow, stable for the entire session even if
-    /// the menu bar auto-hides while the popover is open.
-    /// Reset to nil on close.
-    private var anchorMaxY: CGFloat?
+    /// Screen-space anchor captured once in popoverWillShow:
+    ///   x = window.frame.midX  — horizontal center, keeps arrow centered
+    ///   y = window.frame.maxY  — top edge touching the menu bar, stable
+    ///                            even if the menu bar auto-hides mid-session
+    /// Reset to nil on close so it is re-captured on the next open.
+    private var anchorPoint: NSPoint?
 
     // MARK: - Init
 
@@ -204,12 +199,14 @@ public final class MBKPopoverController: NSObject {
     /// Applies a new preferred content size, clamped to [minWidth, maxWidth] × maxHeight,
     /// then repositions the window absolutely using the anchor captured in popoverWillShow.
     ///
-    /// Origin is derived from anchorMidX/anchorMaxY (stable for the session) and the
-    /// post-mutation window frame dimensions — no delta tracking, no chrome constant.
+    /// Origin is derived from anchorPoint (stable for the session) and the post-mutation
+    /// window frame dimensions — no delta tracking, no chrome constant.
     private func applyContentSize(_ preferred: CGSize) {
         let clamped = clamp(preferred)
         guard clamped.width > 0, clamped.height > 0 else { return }
 
+        // Threshold > 1 (not > 0) to ignore sub-pixel size noise SwiftUI emits
+        // during layout passes where the content hasn't meaningfully changed.
         guard abs(popover.contentSize.width - clamped.width) > 1
            || abs(popover.contentSize.height - clamped.height) > 1 else {
             mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
@@ -218,8 +215,7 @@ public final class MBKPopoverController: NSObject {
 
         guard popover.isShown,
               let window = hostingController.view.window,
-              let midX = anchorMidX,
-              let maxY = anchorMaxY else {
+              let anchor = anchorPoint else {
             popover.contentSize = clamped
             mbkLog("PopoverController", "applyContentSize — not shown, recorded (\(clamped.width),\(clamped.height))")
             return
@@ -233,8 +229,8 @@ public final class MBKPopoverController: NSObject {
 
         // Read window frame after setting contentSize — dimensions now reflect new size.
         let newOrigin = NSPoint(
-            x: midX - window.frame.width / 2,
-            y: maxY - window.frame.height
+            x: anchor.x - window.frame.width / 2,
+            y: anchor.y - window.frame.height
         )
         window.setFrameOrigin(newOrigin)
         mbkLog("PopoverController", "applyContentSize — origin set to \(newOrigin)")
@@ -303,9 +299,8 @@ extension MBKPopoverController: NSPopoverDelegate {
     public func popoverWillShow(_ notification: Notification) {
         setButtonHighlight(true)
         guard let window = hostingController.view.window else { return }
-        anchorMidX = window.frame.midX
-        anchorMaxY = window.frame.maxY
-        mbkLog("PopoverController", "popoverWillShow — anchor midX=\(anchorMidX!) maxY=\(anchorMaxY!)")
+        anchorPoint = NSPoint(x: window.frame.midX, y: window.frame.maxY)
+        mbkLog("PopoverController", "popoverWillShow — anchor=\(anchorPoint!)")
     }
 
     public func popoverShouldClose(_ popover: NSPopover) -> Bool {
@@ -318,8 +313,7 @@ extension MBKPopoverController: NSPopoverDelegate {
         mbkLog("PopoverController", "popoverDidClose")
         setButtonHighlight(false)
         stopEventMonitor()
-        anchorMidX = nil
-        anchorMaxY = nil
+        anchorPoint = nil
         overlayGate.hasActiveOverlay = false
         mbkLog("PopoverController", "overlay gate reset on close")
     }
