@@ -12,15 +12,13 @@
 //   applyContentSize calls panel.setFrame() — free resize, no re-anchor.
 //
 // POSITIONING MODEL:
-//   On open: panel origin is set from button.midX in screen coords.
-//   On resize: delta-based setFrame — origin shifts by half the width delta
-//   so the panel expands symmetrically left and right, and the top edge
-//   stays pinned under the menu bar.
-//     dw = newWidth  - currentWidth
-//     dh = newHeight - currentHeight
-//     origin.x -= dw / 2
-//     origin.y -= dh
-//   This is the standard AppKit pattern for menu-bar panel resizing.
+//   anchorX is captured ONCE at open time: button.midX in screen coords.
+//   On every resize, frame is recomputed from anchorX + new size:
+//     frame.origin.x = anchorX - size.width / 2
+//     frame.origin.y = buttonScreenMinY - size.height
+//   anchorX is never re-read from the button while the panel is open.
+//   This avoids the menu-bar auto-hide instability (button screen-Y
+//   changes between open/close cycles on auto-hide displays).
 //
 // WHY NOT NSPopover:
 //   NSPopover.contentSize re-anchors the popover window on every write
@@ -99,6 +97,11 @@ public final class MBKPopoverController: NSObject {
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
+    /// X midpoint of the status button in screen coordinates, captured at open time.
+    private var anchorX: CGFloat = 0
+    /// Bottom edge of the status button in screen coordinates, captured at open time.
+    private var anchorY: CGFloat = 0
+
     /// Corner radius matching native NSPopover (12pt).
     /// See CORNER RADIUS VALUE in the file header.
     private let cornerRadius: CGFloat = 12
@@ -169,14 +172,14 @@ public final class MBKPopoverController: NSObject {
         let buttonRectInWindow = button.convert(button.bounds, to: nil)
         let buttonRectOnScreen = button.window?.convertToScreen(buttonRectInWindow)
             ?? NSRect(x: screen.frame.midX, y: screen.visibleFrame.maxY, width: 0, height: 0)
-        let anchorX = buttonRectOnScreen.midX
-        let anchorY = buttonRectOnScreen.minY
+        anchorX = buttonRectOnScreen.midX
+        anchorY = buttonRectOnScreen.minY
         mbkLog("PopoverController", "openPanel — anchor=(\(anchorX),\(anchorY))")
 
         let size = panel.frame.size
         let origin = NSPoint(
-            x: round(anchorX - size.width / 2),
-            y: round(anchorY - size.height)
+            x: anchorX - size.width / 2,
+            y: anchorY - size.height
         )
         panel.setFrameOrigin(origin)
         panel.makeKeyAndOrderFront(nil)
@@ -280,20 +283,17 @@ public final class MBKPopoverController: NSObject {
     }
 
     /// Applies a new content size from SwiftUI's preferredContentSize KVO.
-    /// Clamps to [minWidth, maxWidth] x maxHeight, then uses delta-based
-    /// setFrame so the panel expands symmetrically left and right and the
-    /// top edge stays pinned under the menu bar.
+    /// Clamps to [minWidth, maxWidth] x maxHeight, then recomputes the full
+    /// panel frame from anchorX/anchorY — no delta math.
     private func applyContentSize(_ preferred: CGSize) {
         let clamped = clamp(preferred)
         guard clamped.width > 0, clamped.height > 0 else {
             mbkLog("PopoverController", "applyContentSize — skipped: degenerate after clamp")
             return
         }
-
-        var frame = panel.frame
-        let dw = clamped.width  - frame.size.width
-        let dh = clamped.height - frame.size.height
-        guard abs(dw) >= 1 || abs(dh) >= 1 else {
+        let currentSize = panel.frame.size
+        guard abs(currentSize.width  - clamped.width)  >= 1
+           || abs(currentSize.height - clamped.height) >= 1 else {
             mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
             return
         }
@@ -304,12 +304,15 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        frame.origin.x -= dw / 2   // expand symmetrically left + right
-        frame.origin.y -= dh        // pin top edge under menu bar
-        frame.size = clamped
+        let newOrigin = NSPoint(
+            x: round(anchorX - clamped.width / 2),
+            y: round(anchorY - clamped.height)
+        )
+        let newFrame = NSRect(origin: newOrigin, size: clamped)
         mbkLog("PopoverController",
-               "applyContentSize — dw=\(dw) dh=\(dh) → frame=(\(frame))")
-        panel.setFrame(frame, display: true, animate: false)
+               "applyContentSize — (\(currentSize.width),\(currentSize.height))"
+               + "→(\(clamped.width),\(clamped.height)) origin=(\(newOrigin.x),\(newOrigin.y))")
+        panel.setFrame(newFrame, display: true, animate: false)
     }
 
     // MARK: - Workspace observer
