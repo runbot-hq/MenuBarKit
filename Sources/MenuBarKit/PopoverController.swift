@@ -61,16 +61,18 @@
 //   2. Inner — NSGlassEffectView
 //      Pinned to fill clipView. Provides the Tahoe liquid-glass material.
 //      hostingController.view is assigned to its contentView property.
+//      Do NOT set .style on glassView — the default style is correct for a
+//      floating panel. .regular adds a tinting overlay that makes it grey.
+//      Do NOT set wantsLayer or layer.backgroundColor on glassView — it
+//      interferes with the private glass compositor.
 //
 // HOSTING CONTROLLER VIEW TRANSPARENCY:
 //   NSHostingController creates its NSView with an opaque system background
-//   at the AppKit layer. SwiftUI's .background(.clear) does NOT reach this
-//   AppKit layer — it only affects SwiftUI's own render tree above it.
-//   We must explicitly zero the CALayer background on the hosting view:
-//     hostingController.view.wantsLayer = true
-//     hostingController.view.layer?.backgroundColor = .clear
-//   Without this, the hosting view paints a solid grey rect inside
-//   NSGlassEffectView, completely blocking glass refraction.
+//   at the AppKit CALayer level. SwiftUI's .background(.clear) does NOT reach
+//   this layer — it only affects SwiftUI's own render tree above it.
+//   We zero the layer background AFTER glassView.contentView = hostingView
+//   so that the view is attached to a layer tree and .layer is non-nil.
+//   Zeroing it before attachment is a silent no-op (layer is nil at that point).
 //
 // ROUNDED CORNERS — HISTORY:
 //   Approaches tried and rejected (ALL regress to rect corners on sheet open):
@@ -238,15 +240,6 @@ public final class MBKPopoverController: NSObject {
     private func setupPanel() {
         hostingController = NSHostingController(rootView: pendingRootView)
         hostingController.sizingOptions = .preferredContentSize
-
-        // !! TRANSPARENCY — DO NOT REMOVE !!
-        // NSHostingController creates its NSView with an opaque system background
-        // at the AppKit CALayer level. SwiftUI's .background(.clear) does NOT reach
-        // this layer. We must zero it explicitly here or the hosting view paints a
-        // solid grey rect inside NSGlassEffectView, blocking all glass refraction.
-        hostingController.view.wantsLayer = true
-        hostingController.view.layer?.backgroundColor = .clear
-
         mbkLog("PopoverController", "setupPanel — sizingOptions=.preferredContentSize")
 
         sizeObservation = hostingController.observe(
@@ -302,17 +295,27 @@ public final class MBKPopoverController: NSObject {
         // NSGlassEffectView provides the Tahoe liquid-glass material.
         // It MUST be a subview of clipView (not panel.contentView directly).
         // hostingController.view MUST be assigned via .contentView (not addSubview).
+        //
+        // Do NOT set glassView.style — the default is correct for a floating panel.
+        // .regular adds a dark tinting overlay that makes the panel look grey.
+        //
+        // Do NOT set glassView.wantsLayer or glassView.layer?.backgroundColor —
+        // touching the glass view's layer interferes with the private glass compositor.
+        //
         // Do NOT set cornerRadius or clipsToBounds on glassView — both are reset
-        // by addChildWindow(). Corner clipping is handled by clipView.maskImage.
+        // by addChildWindow(). Corner clipping is handled solely by clipView.maskImage.
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         let glassView = NSGlassEffectView()
-        glassView.style = .regular
-        // !! TRANSPARENCY — DO NOT REMOVE !!
-        // NSGlassEffectView may contribute an opaque sublayer behind contentView.
-        // Zero it so the glass compositor sees through to the desktop.
-        glassView.wantsLayer = true
-        glassView.layer?.backgroundColor = .clear
+        // ← NO .style set — default style is correct. .regular = grey tinting overlay, do not use.
         glassView.contentView = hostingController.view  // ← .contentView, NOT addSubview
+
+        // !! TRANSPARENCY — DO NOT MOVE THIS ABOVE glassView.contentView assignment !!
+        // hostingController.view.layer is nil until the view is attached to a layer tree.
+        // We zero the CALayer background here, after attachment, so the call is non-nil
+        // and actually takes effect. Moving it before contentView assignment = silent no-op.
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.backgroundColor = .clear
+
         glassView.translatesAutoresizingMaskIntoConstraints = false
         clipView.addSubview(glassView)
         NSLayoutConstraint.activate([
