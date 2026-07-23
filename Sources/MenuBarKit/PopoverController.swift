@@ -51,6 +51,9 @@ public final class MBKPopoverController: NSObject {
     private let overlayGate: MBKOverlayGate
     private let symbolName: String
     private let contentSize: NSSize
+    /// Maximum height the popover will grow to. Content taller than this
+    /// is scrollable within the popover window.
+    private let maxHeight: CGFloat
 
     // MARK: - Owned objects
 
@@ -67,11 +70,13 @@ public final class MBKPopoverController: NSObject {
         rootView: Content,
         overlayGate: MBKOverlayGate,
         symbolName: String = "menubar.rectangle",
-        contentSize: NSSize = NSSize(width: 320, height: 300)
+        contentSize: NSSize = NSSize(width: 320, height: 300),
+        maxHeight: CGFloat = 600
     ) {
         self.overlayGate = overlayGate
         self.symbolName = symbolName
         self.contentSize = contentSize
+        self.maxHeight = maxHeight
         self.pendingRootView = AnyView(rootView)
     }
 
@@ -114,7 +119,7 @@ public final class MBKPopoverController: NSObject {
 
         let fitting = hostingController.view.fittingSize
         if fitting.width > 0, fitting.height > 0 {
-            popover.contentSize = fitting
+            popover.contentSize = clamp(fitting)
             mbkLog("PopoverController", "openPopover — pre-sized to (\(fitting.width),\(fitting.height))")
         }
 
@@ -165,24 +170,30 @@ public final class MBKPopoverController: NSObject {
         popover.delegate = self
     }
 
-    /// Applies a new preferred content size.
+    /// Clamps a size so height never exceeds maxHeight.
+    private func clamp(_ size: CGSize) -> CGSize {
+        CGSize(width: size.width, height: min(size.height, maxHeight))
+    }
+
+    /// Applies a new preferred content size, clamped to maxHeight.
     ///
     /// Sets popover.contentSize, then corrects the window origin by the
     /// size delta so midX and maxY stay pinned — compensating for AppKit's
     /// default grow-from-bottom-left behaviour without mixing content and
     /// chrome coordinate spaces.
     private func applyContentSize(_ preferred: CGSize) {
-        guard preferred.width > 0, preferred.height > 0 else { return }
+        let clamped = clamp(preferred)
+        guard clamped.width > 0, clamped.height > 0 else { return }
         let currentSize = popover.contentSize
-        guard abs(currentSize.width - preferred.width) > 1
-           || abs(currentSize.height - preferred.height) > 1 else {
+        guard abs(currentSize.width - clamped.width) > 1
+           || abs(currentSize.height - clamped.height) > 1 else {
             mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
             return
         }
 
         guard popover.isShown, let window = hostingController.view.window else {
-            popover.contentSize = preferred
-            mbkLog("PopoverController", "applyContentSize — not shown, recorded (\(preferred.width),\(preferred.height))")
+            popover.contentSize = clamped
+            mbkLog("PopoverController", "applyContentSize — not shown, recorded (\(clamped.width),\(clamped.height))")
             return
         }
 
@@ -190,14 +201,14 @@ public final class MBKPopoverController: NSObject {
         // AppKit repositions the window as a side-effect of contentSize change,
         // so we must read first, then write, then correct.
         let oldFrame = window.frame
-        let dw = preferred.width - currentSize.width
-        let dh = preferred.height - currentSize.height
+        let dw = clamped.width - currentSize.width
+        let dh = clamped.height - currentSize.height
 
         mbkLog("PopoverController",
                "applyContentSize — (\(currentSize.width),\(currentSize.height))→"
-               + "(\(preferred.width),\(preferred.height)) dw=\(dw) dh=\(dh)")
+               + "(\(clamped.width),\(clamped.height)) dw=\(dw) dh=\(dh)")
 
-        popover.contentSize = preferred
+        popover.contentSize = clamped
 
         // Shift origin to keep midX and maxY fixed:
         //   origin.x -= dw/2  → window grows/shrinks symmetrically around center
