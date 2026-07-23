@@ -61,10 +61,8 @@
 //   2. Inner — NSGlassEffectView
 //      Pinned to fill clipView. Provides the Tahoe liquid-glass material.
 //      hostingController.view is assigned to its contentView property.
-//      Do NOT set .style on glassView — the default style is correct for a
-//      floating panel. .regular adds a tinting overlay that makes it grey.
-//      Do NOT set wantsLayer or layer.backgroundColor on glassView — it
-//      interferes with the private glass compositor.
+//      style = .clear — no dimming layer, pure glass refraction.
+//      .regular (default) adds a dimming overlay that makes it look grey.
 //
 // HOSTING CONTROLLER VIEW TRANSPARENCY:
 //   NSHostingController creates its NSView with an opaque system background
@@ -296,8 +294,9 @@ public final class MBKPopoverController: NSObject {
         // It MUST be a subview of clipView (not panel.contentView directly).
         // hostingController.view MUST be assigned via .contentView (not addSubview).
         //
-        // Do NOT set glassView.style — the default is correct for a floating panel.
-        // .regular adds a dark tinting overlay that makes the panel look grey.
+        // style = .clear — removes the dimming layer that .regular applies.
+        // .regular (the default) makes the panel look grey/frosted.
+        // .clear = pure glass refraction, no overlay, correct for panels over desktop.
         //
         // Do NOT set glassView.wantsLayer or glassView.layer?.backgroundColor —
         // touching the glass view's layer interferes with the private glass compositor.
@@ -306,7 +305,7 @@ public final class MBKPopoverController: NSObject {
         // by addChildWindow(). Corner clipping is handled solely by clipView.maskImage.
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         let glassView = NSGlassEffectView()
-        // ← NO .style set — default style is correct. .regular = grey tinting overlay, do not use.
+        glassView.style = .clear  // ← no dimming layer; .regular makes it grey
         glassView.contentView = hostingController.view  // ← .contentView, NOT addSubview
 
         // !! TRANSPARENCY — DO NOT MOVE THIS ABOVE glassView.contentView assignment !!
