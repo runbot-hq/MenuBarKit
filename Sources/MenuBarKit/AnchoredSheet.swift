@@ -20,11 +20,12 @@
 //   No overlayGate: parameter is needed at each call site.
 //
 // NOTIFICATION CLOSURE ISOLATION:
-//   NotificationCenter delivers callbacks on a Sendable (nonisolated) closure.
-//   Notification itself is not Sendable, so it cannot be captured into a
-//   Task { @MainActor in } body. Fix: extract notification.object (AnyObject?,
-//   which is Sendable) before the hop, then cast to NSWindow inside the task.
-//   NSWindow.styleMask and finish() are accessed safely on the main actor.
+//   NotificationCenter is registered with queue: .main, so the callback is
+//   guaranteed to execute on the main thread. Neither Notification nor AnyObject
+//   are Sendable, so a Task { @MainActor } hop is not legal here. Instead,
+//   MainActor.assumeIsolated {} is used to assert main-actor isolation
+//   synchronously inside the already-main-thread callback. This is the correct
+//   Swift 6 pattern for NotificationCenter + queue: .main.
 //
 // CANCELLATION PATH:
 //   If the sheet binding flips back to false before the window becomes key,
@@ -78,21 +79,20 @@ final class MBKSheetAnchorTask {
             guard let self else { return }
             let window = await withCheckedContinuation { (cont: CheckedContinuation<NSWindow?, Never>) in
                 self.continuation = cont
-                // Capture popoverWindow by value so the Sendable closure
-                // does not close over any @MainActor-isolated state.
                 let popoverWindow = self.popoverWindow
                 self.observer = NotificationCenter.default.addObserver(
                     forName: NSWindow.didBecomeKeyNotification,
                     object: nil,
                     queue: .main
                 ) { [weak self] notification in
-                    // Notification is not Sendable — extract .object (AnyObject?,
-                    // which is Sendable) before hopping to @MainActor.
-                    let object = notification.object
-                    Task { @MainActor [weak self] in
+                    // Registered with queue: .main — guaranteed on main thread.
+                    // Neither Notification nor AnyObject are Sendable so a Task hop
+                    // is illegal. MainActor.assumeIsolated asserts isolation
+                    // synchronously without crossing any isolation boundary.
+                    MainActor.assumeIsolated {
                         guard
                             let self,
-                            let window = object as? NSWindow,
+                            let window = notification.object as? NSWindow,
                             window !== popoverWindow,
                             window.styleMask.contains(.borderless)
                         else { return }
