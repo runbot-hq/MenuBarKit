@@ -12,35 +12,32 @@
 //   When a borderless window that is not the popover window becomes key, wire it
 //   as a child of the popover window via addChildWindow(_:ordered:).
 //   This ties the gate and anchoring to the actual AppKit window lifecycle
-//   rather than to SwiftUI's binding state, eliminating both the GCD hop and
-//   the DISMISS-SAFETY GAP from the spike.
+//   rather than to SwiftUI's binding state, eliminating the GCD hop and the
+//   DISMISS-SAFETY GAP from the spike.
+//
+// GATE:
+//   MBKOverlayGate is read from the SwiftUI environment (@Environment).
+//   The host app injects it once at the root view via .environment(overlayGate).
+//   No overlayGate: parameter is needed at each call site.
 //
 // SHEET WINDOW DISCRIMINATOR — why .borderless && not popoverWindow:
 //   The sheet window is matched by: not the popover window and borderless styleMask.
-//   isKeyWindow is NOT used here — we receive the notification only when the window
-//   becomes key, so the check is implicit. The popover window is .nonactivatingPanel
-//   (not .borderless), so excluding it by identity is sufficient.
-//
-//   An earlier version used `contentViewController is NSHostingController<AnyView>`
-//   as a stronger discriminator but SwiftUI's internal sheet window does NOT use
-//   that exact generic specialisation. Do not re-attempt without verifying the
-//   concrete NSHostingController generic type on the target OS version.
+//   isKeyWindow is implicit — we receive the notification only when the window
+//   becomes key. The popover window is .nonactivatingPanel (not .borderless),
+//   so excluding it by identity is sufficient.
 //
 // CANCELLATION PATH — early sheet dismiss before window becomes key:
-//   waitForSheetWindow() stores the continuation in a nonisolated(unsafe) var.
+//   waitForSheetWindow() stores the continuation in MBKSheetAnchorTask.
 //   If the sheet binding flips back to false before the window becomes key,
-//   the caller cancels via cancelWait() which resumes the continuation with nil
+//   the caller cancels via cancel() which resumes the continuation with nil
 //   and removes the observer. This prevents the continuation from leaking.
 //
 // DISMISS-SAFETY:
-//   Gate is cleared in onChange(false) synchronously. addChildWindow removal is
-//   handled by AppKit automatically when the child window closes — no manual
-//   removeChildWindow call is needed on the dismiss path.
+//   Gate is cleared in onChange(false) synchronously. addChildWindow removal
+//   is handled by AppKit automatically when the child window closes.
 //
 // WHY Item: Identifiable & Equatable (not just Identifiable):
 //   onChange(of:) requires Equatable so SwiftUI can diff old vs new values.
-//   Optional<Item> conditionally conforms to Equatable only when Item is Equatable.
-//   SwiftUI's own .sheet(item:) only requires Identifiable because it doesn't diff.
 //   MBKAnchoredSheetItemModifier uses onChange to observe the full item so it
 //   can re-anchor on non-nil→non-nil identity swaps, which requires Equatable.
 
@@ -50,12 +47,9 @@ import SwiftUI
 // MARK: - Module-level anchor helper
 
 /// Waits for a borderless NSWindow (other than `popoverWindow`) to become key,
-/// then wires it as a child of `popoverWindow`. Returns the anchored window,
-/// or `nil` if cancelled before the window appeared.
-///
-/// Cancellation: call `cancel()` on the returned token to abort the wait and
-/// resume the continuation cleanly. Safe to call even after the window has
-/// already been found.
+/// then wires it as a child of `popoverWindow`.
+/// Returns a cancellable token — call `cancel()` if the sheet is dismissed
+/// before its window appeared.
 @MainActor
 func mbkWaitAndAnchorSheetWindow(
     popoverWindow: NSWindow,
@@ -67,7 +61,6 @@ func mbkWaitAndAnchorSheetWindow(
 }
 
 /// Cancellable token returned by `mbkWaitAndAnchorSheetWindow`.
-/// Call `cancel()` if the sheet is dismissed before its window became key.
 @MainActor
 final class MBKSheetAnchorTask {
     private let popoverWindow: NSWindow
@@ -85,7 +78,6 @@ final class MBKSheetAnchorTask {
         task = Task { [weak self] in
             guard let self else { return }
             let window = await withCheckedContinuation { (cont: CheckedContinuation<NSWindow?, Never>) in
-                // Store continuation so cancel() can resume it.
                 self.continuation = cont
                 self.observer = NotificationCenter.default.addObserver(
                     forName: NSWindow.didBecomeKeyNotification,
@@ -128,40 +120,33 @@ final class MBKSheetAnchorTask {
 // MARK: - View extension
 
 /// View extension providing `mbkSheet` modifiers for popover-anchored sheet presentation.
+/// Reads `MBKOverlayGate` from the SwiftUI environment — inject it at the root view
+/// via `.environment(overlayGate)` and no `overlayGate:` parameter is needed at call sites.
 public extension View {
 
     /// Presents a sheet anchored as a child of the popover window so it
     /// survives outside-clicks and stays visible when the popover loses focus.
-    ///
-    /// Manages `overlayGate.hasActiveOverlay` automatically.
+    /// Reads `MBKOverlayGate` from the environment automatically.
     func mbkSheet<SheetContent: View>(
         isPresented: Binding<Bool>,
-        overlayGate: MBKOverlayGate,
         @ViewBuilder content: @escaping () -> SheetContent
     ) -> some View {
         modifier(MBKAnchoredSheetModifier(
             isPresented: isPresented,
-            overlayGate: overlayGate,
             sheetContent: content
         ))
     }
 
     /// Presents a sheet anchored as a child of the popover window, driven by
     /// an optional item binding — matching SwiftUI's `.sheet(item:)` API shape.
-    ///
-    /// The sheet is presented when `item` becomes non-nil and dismissed when it
-    /// returns to nil. `overlayGate.hasActiveOverlay` is managed automatically.
-    ///
-    /// `Item` must conform to both `Identifiable` and `Equatable` — see
-    /// WHY Item: Identifiable & Equatable in the file header.
+    /// Reads `MBKOverlayGate` from the environment automatically.
+    /// `Item` must conform to both `Identifiable` and `Equatable` — see file header.
     func mbkSheet<Item: Identifiable & Equatable, SheetContent: View>(
         item: Binding<Item?>,
-        overlayGate: MBKOverlayGate,
         @ViewBuilder content: @escaping (Item) -> SheetContent
     ) -> some View {
         modifier(MBKAnchoredSheetItemModifier(
             item: item,
-            overlayGate: overlayGate,
             sheetContent: content
         ))
     }
@@ -170,12 +155,12 @@ public extension View {
 // MARK: - isPresented variant
 
 /// ViewModifier that anchors a SwiftUI sheet as a child window of the popover
-/// and manages `MBKOverlayGate` for the sheet's lifetime.
+/// and manages `MBKOverlayGate` (read from environment) for the sheet's lifetime.
 public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
     @Binding public var isPresented: Bool
-    public let overlayGate: MBKOverlayGate
     public let sheetContent: () -> SheetContent
 
+    @Environment(MBKOverlayGate.self) private var overlayGate
     @State private var anchorTask: MBKSheetAnchorTask?
 
     public func body(content: Content) -> some View {
@@ -197,7 +182,6 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
                         )
                     }
                 } else {
-                    // Cancel in case the sheet was dismissed before its window became key.
                     anchorTask?.cancel()
                     anchorTask = nil
                 }
@@ -208,17 +192,13 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
 // MARK: - item variant
 
 /// ViewModifier that anchors a SwiftUI `.sheet(item:)` as a child window of the
-/// popover and manages `MBKOverlayGate` for the sheet's lifetime.
-///
+/// popover and manages `MBKOverlayGate` (read from environment) for the sheet's lifetime.
 /// `Item` must conform to `Identifiable & Equatable` — see file header.
-///
-/// Uses `onChange(of: item)` rather than `onChange(of: item != nil)` so anchoring
-/// fires on every identity change, including non-nil→non-nil swaps.
 public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, SheetContent: View>: ViewModifier {
     @Binding public var item: Item?
-    public let overlayGate: MBKOverlayGate
     public let sheetContent: (Item) -> SheetContent
 
+    @Environment(MBKOverlayGate.self) private var overlayGate
     @State private var anchorTask: MBKSheetAnchorTask?
 
     public func body(content: Content) -> some View {

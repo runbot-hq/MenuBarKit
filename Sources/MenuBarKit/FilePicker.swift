@@ -4,25 +4,24 @@
 // Presents NSOpenPanel anchored to the popover window via beginSheetModal,
 // and manages overlayGate.hasActiveOverlay for the duration of the panel's lifetime.
 //
+// GATE:
+//   MBKOverlayGate is passed explicitly here because mbkOpenFilePicker is a
+//   free function, not a ViewModifier — it has no access to the SwiftUI
+//   environment. The caller must pass the gate obtained from @Environment.
+//
 // WHY beginSheetModal INSTEAD OF runModal:
 //   NSOpenPanel.runModal() blocks the main thread and ignores the popover.
 //   beginSheetModal attaches the panel as a sheet to a specific window,
 //   keeping it visually anchored.
 //
 // WHY hasActiveOverlay IS SET BEFORE beginSheetModal:
-//   popoverShouldClose can fire at any point, including during the brief window
-//   between when we decide to open the panel and when beginSheetModal returns.
-//   Setting the gate before the call ensures the dismiss gate is armed for the
-//   entire panel lifetime with no race.
+//   popoverShouldClose can fire between deciding to open the panel and
+//   beginSheetModal returning. Setting the gate first ensures no race.
 //
 // beginSheetModal COMPLETION — WHY Task { @MainActor }:
-//   NSOpenPanel.beginSheetModal delivers its completion on the main thread, but
-//   this guarantee is informal (not expressed in the Swift type system). The
-//   completion mutates overlayGate.hasActiveOverlay (@MainActor-isolated) and
-//   calls back into caller-supplied code that may also touch actor-isolated state.
-//   Wrapping in Task { @MainActor } makes the actor hop explicit and
-//   compiler-enforced, rather than relying on AppKit's undocumented delivery
-//   guarantee. This is the correct Swift 6 pattern.
+//   NSOpenPanel.beginSheetModal delivers its completion on the main thread,
+//   but this guarantee is informal. Task { @MainActor } makes the actor hop
+//   explicit and compiler-enforced — the correct Swift 6 pattern.
 
 import AppKit
 
@@ -31,9 +30,8 @@ import AppKit
 /// or nil if the user cancelled.
 ///
 /// - Parameters:
-///   - overlayGate: The shared overlay gate; set to `true` while the picker is open.
+///   - overlayGate: The shared overlay gate — obtain from `@Environment(MBKOverlayGate.self)`.
 ///   - message: Optional descriptive message shown in the panel header.
-///     Pass `nil` to use the system default.
 ///   - completion: Called on the main actor with the selected `URL`, or `nil` if cancelled.
 @MainActor
 public func mbkOpenFilePicker(
