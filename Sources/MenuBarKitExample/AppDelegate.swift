@@ -8,24 +8,22 @@
 //
 // Nothing about popover lifecycle, monitors, or window management lives here.
 //
-// SESSION RESPAWN:
-//   onDidClose       — snapshots state on normal close (no overlay active).
-//   onWillForceClose — snapshots state when an overlay is active at close time
-//                       (e.g. sheet open + outside click). Fires BEFORE the gate
-//                       is cleared and BEFORE isSheetPresented is reset, so the
-//                       snapshot correctly captures route=settings, sheet=true.
-//   onWillShow       — restores lastSession before show() so the popover
-//                       reopens into the exact hierarchy it had when it closed.
+// SESSION RESPAWN — hook split:
+//   onWillShow  → restore route only. Fires before popover.show(). Safe because
+//                 route has no overlay gate side effects.
+//   onDidShow   → restore isSheetPresented only. Fires via Task { @MainActor }
+//                 after popover.show(), so the popover window exists and
+//                 AnchoredSheet can anchor correctly without phantom gate arming.
+//   onDidClose       → snapshot on normal close (no overlay active).
+//   onWillForceClose → snapshot when sheet is open at outside-click time,
+//                      BEFORE gate is cleared and BEFORE isSheetPresented resets.
 
 import AppKit
 import MenuBarKit
 import SwiftUI
 
-/// Application delegate. Creates the shared `AppState` and `MBKOverlayGate`,
-/// then hands them to `MBKPopoverController` for the full menu-bar lifecycle.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    /// Wires the popover controller on launch.
     func applicationDidFinishLaunching(_ notification: Notification) {
         popoverController = MBKPopoverController(
             rootView: RootView()
@@ -39,37 +37,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         popoverController.setup()
 
-        // Normal close (no overlay active) — snapshot after close.
+        // Restore route before show() — no gate side effects.
+        popoverController.onWillShow = { [weak self] in
+            guard let self, let snap = lastSession else { return }
+            appState.route = snap.route
+            print("[AppDelegate] route restored: \(snap.route)")
+        }
+
+        // Restore isSheetPresented after show() — needs popover window to exist
+        // so AnchoredSheet can anchor correctly and arm the gate without leaving
+        // it permanently true on a phantom window.
+        popoverController.onDidShow = { [weak self] in
+            guard let self, let snap = lastSession else { return }
+            appState.isSheetPresented = snap.isSheetPresented
+            print("[AppDelegate] isSheetPresented restored: \(snap.isSheetPresented)")
+        }
+
+        // Normal close — snapshot after close.
         popoverController.onDidClose = { [weak self] in
             guard let self else { return }
             lastSession = appState.saveSnapshot()
             print("[AppDelegate] session saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
         }
 
-        // Force-close (overlay active, e.g. sheet open + outside click) —
-        // snapshot BEFORE gate is cleared and BEFORE isSheetPresented resets.
+        // Force-close (sheet open + outside click) — snapshot BEFORE gate is
+        // cleared and BEFORE isSheetPresented resets.
         popoverController.onWillForceClose = { [weak self] in
             guard let self else { return }
             lastSession = appState.saveSnapshot()
             print("[AppDelegate] session force-saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
         }
-
-        // Restore snapshot before show() so hierarchy respawns correctly.
-        popoverController.onWillShow = { [weak self] in
-            guard let self, let snap = lastSession else { return }
-            appState.restoreSnapshot(snap)
-            print("[AppDelegate] session restored: route=\(snap.route) sheet=\(snap.isSheetPresented)")
-        }
     }
 
     // MARK: - Private
 
-    /// App-specific observable state passed into views via SwiftUI environment.
     private let appState = AppState()
-    /// Shared overlay gate — MenuBarKit reads and writes this; the example never touches it directly.
     private let overlayGate = MBKOverlayGate()
-    /// The MenuBarKit controller that owns NSPopover, NSStatusItem, and all observers.
     private var popoverController: MBKPopoverController!
-    /// Last saved session snapshot. nil on first open (no state to restore).
     private var lastSession: AppState.SessionSnapshot?
 }
