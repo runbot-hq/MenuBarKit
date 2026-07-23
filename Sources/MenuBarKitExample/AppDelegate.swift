@@ -23,7 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .environment(appState)
                 .environment(overlayGate),
             overlayGate: overlayGate,
-            symbolName: "flask.fill"
+            symbolName: "flask.fill",
+            contentSize: NSSize(width: 280, height: 200),
+            minWidth: 200,
+            maxWidth: 480,
+            maxHeight: 600
         )
         popoverController.setup()
     }

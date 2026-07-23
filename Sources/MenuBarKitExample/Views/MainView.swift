@@ -5,22 +5,38 @@ import SwiftUI
 
 /// Landing view shown on first popover open. Navigates to `SettingsView`.
 ///
-/// Exercises dynamic height via a scrollable list with a "Show more" button.
-/// Uses a plain VStack (not LazyVStack) inside the ScrollView so that
-/// fittingSize returns the correct intrinsic height before the view is
-/// attached to a window — LazyVStack and ScrollView alone cannot measure
-/// their content height without window bounds.
-///
-/// Intentionally uses a DIFFERENT width (280) than SettingsView to
-/// exercise PopoverController's dynamic-width arrow centering fix.
+/// Exercises dynamic width AND height via a scrollable list with variable-length
+/// rows and a "Show more" button. Width tracks the widest visible row, clamped
+/// by PopoverController's minWidth/maxWidth. Text truncates at maxWidth.
+/// Height is clamped by PopoverController's maxHeight — scroll kicks in beyond that.
 struct MainView: View {
     @Environment(AppState.self) private var appState
 
-    /// All available list items. Pre-populated at init so fittingSize
-    /// is correct on first open without any async data loading.
-    private let allItems: [String] = (1...20).map { "Workflow run #\($0 * 100 + Int.random(in: 0...99))" }
+    /// Pre-populated items with varying label lengths so width changes on each
+    /// "Show more" tap. Seeded so layout is deterministic across runs.
+    private let allItems: [(icon: String, label: String)] = [
+        ("checkmark.circle.fill",  "Build succeeded"),
+        ("xmark.circle.fill",      "Test suite failed on runner macos-15-xl"),
+        ("clock.fill",             "Queued"),
+        ("arrow.clockwise",        "Re-running deploy-production"),
+        ("checkmark.circle.fill",  "Lint passed"),
+        ("xmark.circle.fill",      "E2E tests timed out after 60 minutes on staging"),
+        ("clock.fill",             "Waiting for approval"),
+        ("checkmark.circle.fill",  "Release build complete — v2.4.1"),
+        ("arrow.clockwise",        "Retrying flaky snapshot test"),
+        ("xmark.circle.fill",      "Deploy failed: health check did not pass"),
+        ("checkmark.circle.fill",  "OK"),
+        ("clock.fill",             "Pending dependency: upload-artifacts"),
+        ("checkmark.circle.fill",  "Code signing passed"),
+        ("xmark.circle.fill",      "Notarisation rejected"),
+        ("arrow.clockwise",        "Scheduled nightly run"),
+        ("checkmark.circle.fill",  "Delta upload done"),
+        ("clock.fill",             "In progress"),
+        ("xmark.circle.fill",      "Runner disconnected mid-job — investigate logs"),
+        ("checkmark.circle.fill",  "Cache warmed"),
+        ("checkmark.circle.fill",  "All checks passed — ready to merge"),
+    ]
 
-    /// Number of items currently visible in the list.
     @State private var visibleCount = 5
 
     var body: some View {
@@ -39,26 +55,23 @@ struct MainView: View {
 
             Divider()
 
-            // Scrollable list — ScrollView provides scroll when popover is clamped
-            // to maxHeight. Plain VStack (not Lazy) gives correct intrinsic height
-            // to fittingSize pre-window.
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(allItems.prefix(visibleCount).enumerated()), id: \.offset) { _, item in
-                        HStack {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
+                        HStack(spacing: 8) {
+                            Image(systemName: item.icon)
+                                .foregroundStyle(iconColor(item.icon))
                                 .font(.caption)
-                            Text(item)
+                            Text(item.label)
                                 .font(.system(size: 12))
-                            Spacer()
+                                .lineLimit(1)   // truncate at maxWidth, never wrap
+                            Spacer(minLength: 12)
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
                         Divider()
                     }
 
-                    // Show more button — only when items remain hidden
                     if visibleCount < allItems.count {
                         let nextBatch = min(5, allItems.count - visibleCount)
                         Button("Show \(nextBatch) more…") {
@@ -72,18 +85,27 @@ struct MainView: View {
                         .padding(.vertical, 8)
                     }
                 }
-                // fixedSize on the inner VStack makes it report its full
-                // intrinsic height rather than filling the ScrollView's proposal.
+                // Reports full intrinsic height to the GeometryReader —
+                // without this, ScrollView collapses to its proposal.
                 .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(width: 280)
-        // fixedSize on the outer VStack so the root reports intrinsic height
-        // to fittingSize (read in openPopover before show()) and to the
-        // GeometryReader in PopoverController (read after show() via onChange).
-        // PopoverController.maxHeight clamps the result — no .frame(maxHeight:) here.
+        // No hard .frame(width:) — width is content-driven.
+        // fixedSize() makes the root report its intrinsic size to both
+        // fittingSize (read in openPopover) and the GeometryReader (read
+        // via onChange after show()). PopoverController clamps the result
+        // to [minWidth, maxWidth] x maxHeight.
         .fixedSize()
-        .onAppear    { print("[MainView] onAppear") }
+        .onAppear    { print("[MainView] onAppear visibleCount=\(visibleCount)") }
         .onDisappear { print("[MainView] onDisappear") }
+    }
+
+    private func iconColor(_ systemName: String) -> Color {
+        switch systemName {
+        case "checkmark.circle.fill": return .green
+        case "xmark.circle.fill":     return .red
+        case "clock.fill":            return .orange
+        default:                      return .blue
+        }
     }
 }

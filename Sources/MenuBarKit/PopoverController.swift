@@ -51,8 +51,11 @@ public final class MBKPopoverController: NSObject {
     private let overlayGate: MBKOverlayGate
     private let symbolName: String
     private let contentSize: NSSize
-    /// Maximum height the popover will grow to. Content taller than this
-    /// is scrollable within the popover window.
+    /// Minimum width the popover will shrink to.
+    private let minWidth: CGFloat
+    /// Maximum width the popover will grow to. Content wider than this truncates.
+    private let maxWidth: CGFloat
+    /// Maximum height the popover will grow to. Content taller than this is scrollable.
     private let maxHeight: CGFloat
 
     // MARK: - Owned objects
@@ -71,11 +74,15 @@ public final class MBKPopoverController: NSObject {
         overlayGate: MBKOverlayGate,
         symbolName: String = "menubar.rectangle",
         contentSize: NSSize = NSSize(width: 320, height: 300),
+        minWidth: CGFloat = 200,
+        maxWidth: CGFloat = 600,
         maxHeight: CGFloat = 600
     ) {
         self.overlayGate = overlayGate
         self.symbolName = symbolName
         self.contentSize = contentSize
+        self.minWidth = minWidth
+        self.maxWidth = maxWidth
         self.maxHeight = maxHeight
         self.pendingRootView = AnyView(rootView)
     }
@@ -170,12 +177,15 @@ public final class MBKPopoverController: NSObject {
         popover.delegate = self
     }
 
-    /// Clamps a size so height never exceeds maxHeight.
+    /// Clamps a size within [minWidth, maxWidth] × [1, maxHeight].
     private func clamp(_ size: CGSize) -> CGSize {
-        CGSize(width: size.width, height: min(size.height, maxHeight))
+        CGSize(
+            width: min(max(size.width, minWidth), maxWidth),
+            height: min(size.height, maxHeight)
+        )
     }
 
-    /// Applies a new preferred content size, clamped to maxHeight.
+    /// Applies a new preferred content size, clamped to [minWidth,maxWidth] x maxHeight.
     ///
     /// Sets popover.contentSize, then corrects the window origin by the
     /// size delta so midX and maxY stay pinned — compensating for AppKit's
@@ -197,9 +207,6 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        // Capture current window origin BEFORE mutating contentSize.
-        // AppKit repositions the window as a side-effect of contentSize change,
-        // so we must read first, then write, then correct.
         let oldFrame = window.frame
         let dw = clamped.width - currentSize.width
         let dh = clamped.height - currentSize.height
@@ -210,9 +217,6 @@ public final class MBKPopoverController: NSObject {
 
         popover.contentSize = clamped
 
-        // Shift origin to keep midX and maxY fixed:
-        //   origin.x -= dw/2  → window grows/shrinks symmetrically around center
-        //   origin.y -= dh    → window grows/shrinks downward, top edge stays put
         var newOrigin = oldFrame.origin
         newOrigin.x -= dw / 2
         newOrigin.y -= dh
