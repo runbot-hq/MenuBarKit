@@ -7,6 +7,11 @@
 //   - MBKPopoverController (configured with root view + gate)
 //
 // Nothing about popover lifecycle, monitors, or window management lives here.
+//
+// SESSION RESPAWN:
+//   onDidClose snapshots route + isSheetPresented into lastSession.
+//   onWillShow restores lastSession before show() so the popover
+//   reopens into the exact hierarchy it had when it closed.
 
 import AppKit
 import MenuBarKit
@@ -29,6 +34,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             maxHeight: 600
         )
         popoverController.setup()
+
+        popoverController.onDidClose = { [weak self] in
+            guard let self else { return }
+            lastSession = appState.saveSnapshot()
+            print("[AppDelegate] session saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
+        }
+        popoverController.onWillShow = { [weak self] in
+            guard let self, let snap = lastSession else { return }
+            appState.restoreSnapshot(snap)
+            print("[AppDelegate] session restored: route=\(snap.route) sheet=\(snap.isSheetPresented)")
+        }
     }
 
     // MARK: - Private
@@ -39,4 +55,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let overlayGate = MBKOverlayGate()
     /// The MenuBarKit controller that owns NSPopover, NSStatusItem, and all observers.
     private var popoverController: MBKPopoverController!
+    /// Last saved session snapshot. nil on first open (no state to restore).
+    private var lastSession: AppState.SessionSnapshot?
 }
