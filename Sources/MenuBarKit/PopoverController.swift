@@ -102,9 +102,6 @@ public final class MBKPopoverController: NSObject {
             Task { @MainActor [weak self] in self?.applyContentSize(newSize) }
         }
 
-        // Removed .nonactivatingPanel — NSGlassEffectView renders in the inactive/frosted
-        // state when the window never becomes key. Without this flag the panel becomes
-        // key on open and glass renders in its active (clear/vibrant) state.
         panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: initialSize),
             styleMask: [.borderless],
@@ -119,6 +116,8 @@ public final class MBKPopoverController: NSObject {
         let glassView = NSGlassEffectView(frame: NSRect(origin: .zero, size: initialSize))
         glassView.cornerRadius = 12
         glassView.autoresizingMask = [.width, .height]
+        // Darken the glass surface. Increase alpha toward 1.0 for more darkness.
+        glassView.tintColor = NSColor.black.withAlphaComponent(0.35)
 
         let hostingView = hostingController.view
         hostingView.translatesAutoresizingMaskIntoConstraints = false
