@@ -78,10 +78,9 @@ This package is **work in progress**. Known issues are documented inline with `/
 - **`DispatchQueue.main.async` in `anchorSheetWindow()`** — mixes GCD with Swift concurrency. Gated by `#warning`. To be replaced with the notification-based approach.
 - **`sheetChildWindow` predicate is intentionally weak** — works for single-child-window environments only. See `FilePicker.swift` before strengthening.
 
-## Open tasks
+## To test example project
 
-- [ ] Replace `DispatchQueue.main.async` in `anchorSheetWindow()` with `NSWindow.didBecomeKeyNotification` (see `TARGET IMPLEMENTATION` in `AnchoredSheet.swift`)
-- [ ] Fix dismiss-safety gap — tie gate lifetime to window lifecycle, not SwiftUI binding state
-- [ ] Strengthen `sheetChildWindow` predicate for multi-child-window environments
-- [ ] Add more test coverage (gate teardown paths, popover delegate logic)
-- [ ] Remove explicit `overlayGate:` parameter from all MBK modifiers — resolve via `@Environment` internally (see [#2](https://github.com/runbot-hq/MenuBarKit/issues/2))
+```
+git pull
+swift run MenuBarKitExample
+```
