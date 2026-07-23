@@ -33,6 +33,18 @@
 //   the NSHostingController view inside it. This reproduces the standard
 //   macOS popover glass background + corner radius without NSPopover.
 //
+// ROUNDED CORNERS — WHY CAShapeLayer MASK, NOT masksToBounds:
+//   layer.cornerRadius + masksToBounds works before a sheet opens, but
+//   calling addChildWindow(_:ordered:) on the panel causes macOS to switch
+//   the window to a security compositing mode. In that mode, the window
+//   server composites the panel directly and masksToBounds is no longer
+//   honoured — the corners go square while the sheet is open.
+//
+//   A CAShapeLayer mask is applied by Core Animation, upstream of the
+//   window compositor, so it is unaffected by addChildWindow. The mask
+//   path is updated in applyContentSize on every resize so the corners
+//   always match the current panel size.
+//
 // SHEETS / OVERLAY GATE:
 //   MBKAnchoredSheet renders as an overlay inside the same NSHostingController.
 //   MBKOverlayGate blocks panel close while an overlay is active.
@@ -64,6 +76,14 @@ public final class MBKPopoverController: NSObject {
     private var anchorX: CGFloat = 0
     /// Bottom edge of the status button in screen coordinates, captured at open time.
     private var anchorY: CGFloat = 0
+
+    /// The CAShapeLayer mask applied to the visual effect view for rounded corners.
+    /// Stored so applyContentSize can update its path on every resize.
+    private var cornerMaskLayer: CAShapeLayer?
+
+    /// Corner radius applied via CAShapeLayer mask. Must match the visual effect
+    /// view's expected radius. See ROUNDED CORNERS in the file header.
+    private let cornerRadius: CGFloat = 10
 
     // MARK: - Init
 
@@ -187,15 +207,26 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // NSVisualEffectView provides the standard macOS popover glass
-        // background (frosted, rounded corners) that NSPopover gave for free.
+        // NSVisualEffectView provides the standard macOS popover glass background.
+        // Rounded corners are applied via a CAShapeLayer mask (see ROUNDED CORNERS
+        // in the file header) — NOT via cornerRadius + masksToBounds, which is
+        // dropped by the window server when addChildWindow() is called.
         let visualEffect = NSVisualEffectView()
         visualEffect.material = .popover
         visualEffect.blendingMode = .behindWindow
         visualEffect.state = .active
         visualEffect.wantsLayer = true
-        visualEffect.layer?.cornerRadius = 10
-        visualEffect.layer?.masksToBounds = true
+
+        // Apply initial rounded-corner mask for the initialSize.
+        let maskLayer = CAShapeLayer()
+        maskLayer.path = CGPath(
+            roundedRect: CGRect(origin: .zero, size: initialSize),
+            cornerWidth: cornerRadius,
+            cornerHeight: cornerRadius,
+            transform: nil
+        )
+        visualEffect.layer?.mask = maskLayer
+        cornerMaskLayer = maskLayer
 
         // Embed the SwiftUI hosting view inside the visual effect view.
         let contentView = hostingController.view
@@ -214,6 +245,7 @@ public final class MBKPopoverController: NSObject {
 
     /// Applies a new content size from SwiftUI's preferredContentSize KVO.
     /// Recomputes the full panel frame from anchorX/anchorY — no delta math.
+    /// Also updates the CAShapeLayer corner mask to match the new size.
     private func applyContentSize(_ preferred: CGSize) {
         guard preferred.width > 0, preferred.height > 0 else {
             mbkLog("PopoverController", "applyContentSize — skipped: degenerate (\(preferred.width),\(preferred.height))")
@@ -225,6 +257,15 @@ public final class MBKPopoverController: NSObject {
             mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
             return
         }
+
+        // Update the corner mask path to match the new size.
+        // CAShapeLayer.path is not implicitly animated — assign directly.
+        cornerMaskLayer?.path = CGPath(
+            roundedRect: CGRect(origin: .zero, size: preferred),
+            cornerWidth: cornerRadius,
+            cornerHeight: cornerRadius,
+            transform: nil
+        )
 
         guard panel.isVisible else {
             panel.setContentSize(preferred)
