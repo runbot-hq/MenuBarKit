@@ -9,7 +9,7 @@ struct RootView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        Group {
+        ZStack {
             switch appState.route {
             case .main:     MainView()
             case .settings: SettingsView()
