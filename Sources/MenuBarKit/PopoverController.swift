@@ -59,6 +59,11 @@
 //   Sonoma / Sequoia / Tahoe for popovers). Tahoe's larger radii apply
 //   to regular app windows, not to popovers / menu-bar panels.
 //
+// SIZE CLAMPING:
+//   applyContentSize clamps preferredContentSize to [minWidth, maxWidth] x maxHeight.
+//   Content wider than maxWidth is clipped by lineLimit(1) + truncation in SwiftUI.
+//   Content taller than maxHeight is scrollable inside the ScrollView.
+//
 // SHEETS / OVERLAY GATE:
 //   MBKAnchoredSheet renders as an overlay inside the same NSHostingController.
 //   MBKOverlayGate blocks panel close while an overlay is active.
@@ -75,6 +80,12 @@ public final class MBKPopoverController: NSObject {
     private let overlayGate: MBKOverlayGate
     private let symbolName: String
     private let initialSize: NSSize
+    /// Minimum width the panel will shrink to.
+    private let minWidth: CGFloat
+    /// Maximum width the panel will grow to. SwiftUI content truncates beyond this.
+    private let maxWidth: CGFloat
+    /// Maximum height the panel will grow to. Content taller than this scrolls.
+    private let maxHeight: CGFloat
 
     // MARK: - Owned objects
 
@@ -101,11 +112,17 @@ public final class MBKPopoverController: NSObject {
         rootView: Content,
         overlayGate: MBKOverlayGate,
         symbolName: String = "menubar.rectangle",
-        contentSize: NSSize = NSSize(width: 320, height: 300)
+        contentSize: NSSize = NSSize(width: 320, height: 300),
+        minWidth: CGFloat = 200,
+        maxWidth: CGFloat = 600,
+        maxHeight: CGFloat = 600
     ) {
         self.overlayGate = overlayGate
         self.symbolName = symbolName
         self.initialSize = contentSize
+        self.minWidth = minWidth
+        self.maxWidth = maxWidth
+        self.maxHeight = maxHeight
         self.pendingRootView = AnyView(rootView)
     }
 
@@ -257,34 +274,44 @@ public final class MBKPopoverController: NSObject {
         return image
     }
 
+    /// Clamps a size within [minWidth, maxWidth] x [1, maxHeight].
+    private func clamp(_ size: CGSize) -> CGSize {
+        CGSize(
+            width:  min(max(size.width,  minWidth), maxWidth),
+            height: min(max(size.height, 1),        maxHeight)
+        )
+    }
+
     /// Applies a new content size from SwiftUI's preferredContentSize KVO.
-    /// Recomputes the full panel frame from anchorX/anchorY — no delta math.
+    /// Clamps to [minWidth, maxWidth] x maxHeight, then recomputes the full
+    /// panel frame from anchorX/anchorY — no delta math.
     private func applyContentSize(_ preferred: CGSize) {
-        guard preferred.width > 0, preferred.height > 0 else {
-            mbkLog("PopoverController", "applyContentSize — skipped: degenerate (\(preferred.width),\(preferred.height))")
+        let clamped = clamp(preferred)
+        guard clamped.width > 0, clamped.height > 0 else {
+            mbkLog("PopoverController", "applyContentSize — skipped: degenerate after clamp")
             return
         }
         let currentSize = panel.frame.size
-        guard abs(currentSize.width  - preferred.width)  >= 1
-           || abs(currentSize.height - preferred.height) >= 1 else {
+        guard abs(currentSize.width  - clamped.width)  >= 1
+           || abs(currentSize.height - clamped.height) >= 1 else {
             mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
             return
         }
 
         guard panel.isVisible else {
-            panel.setContentSize(preferred)
-            mbkLog("PopoverController", "applyContentSize — not visible, pre-sized to (\(preferred.width),\(preferred.height))")
+            panel.setContentSize(clamped)
+            mbkLog("PopoverController", "applyContentSize — not visible, pre-sized to (\(clamped.width),\(clamped.height))")
             return
         }
 
         let newOrigin = NSPoint(
-            x: round(anchorX - preferred.width / 2),
-            y: round(anchorY - preferred.height)
+            x: round(anchorX - clamped.width / 2),
+            y: round(anchorY - clamped.height)
         )
-        let newFrame = NSRect(origin: newOrigin, size: preferred)
+        let newFrame = NSRect(origin: newOrigin, size: clamped)
         mbkLog("PopoverController",
                "applyContentSize — (\(currentSize.width),\(currentSize.height))"
-               + "→(\(preferred.width),\(preferred.height)) origin=(\(newOrigin.x),\(newOrigin.y))")
+               + "→(\(clamped.width),\(clamped.height)) origin=(\(newOrigin.x),\(newOrigin.y))")
         panel.setFrame(newFrame, display: true, animate: false)
     }
 

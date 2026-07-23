@@ -23,7 +23,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .environment(appState)
                 .environment(overlayGate),
             overlayGate: overlayGate,
-            symbolName: "flask.fill"
+            symbolName: "flask.fill",
+            minWidth: 200,
+            maxWidth: 480,
+            maxHeight: 600
         )
         popoverController.setup()
     }
@@ -34,6 +37,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let appState = AppState()
     /// Shared overlay gate — MenuBarKit reads and writes this; the example never touches it directly.
     private let overlayGate = MBKOverlayGate()
-    /// The MenuBarKit controller that owns NSPopover, NSStatusItem, and all observers.
+    /// The MenuBarKit controller that owns NSPanel, NSStatusItem, and all observers.
     private var popoverController: MBKPopoverController!
 }

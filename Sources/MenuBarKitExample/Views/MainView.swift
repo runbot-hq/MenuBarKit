@@ -1,28 +1,56 @@
 // MainView.swift
 // MenuBarKitExample
 //
-// Demonstrates dynamic height growth via a "Show more" button.
-// preferredContentSize KVO in PopoverController picks up every height
-// change and resizes + recenters the popover automatically.
-// Width = 260 (narrower than Settings 320) exercises arrow-centering on nav.
+// Exercises dynamic width AND height via a scrollable list with variable-length
+// rows and a "Show 5 more…" button.
+//
+// Width is content-driven (no fixed .frame(width:)). The VStack reports its
+// intrinsic width via .fixedSize() and PopoverController clamps the result to
+// [minWidth, maxWidth]. Rows use .lineLimit(1) so text exceeding maxWidth
+// truncates with an ellipsis rather than wrapping.
+//
+// Height grows with each "Show more" press up to PopoverController's maxHeight,
+// after which the ScrollView scrolls vertically.
 
 import AppKit
 import SwiftUI
 
 struct MainView: View {
     @Environment(AppState.self) private var appState
-    @State private var visibleCount: Int = 4
 
-    private var maxScrollHeight: CGFloat {
-        (NSScreen.main?.visibleFrame.height ?? 800) * 0.80
-    }
+    // Deterministic varied-length items. Mix of short, medium and long labels
+    // so successive "Show more" presses produce visible width changes.
+    private let allItems: [(icon: String, label: String)] = [
+        ("checkmark.circle.fill", "Build succeeded"),
+        ("xmark.circle.fill",     "Test suite failed on runner macos-15-xl"),
+        ("clock.fill",            "Queued"),
+        ("arrow.clockwise",       "Re-running deploy-production"),
+        ("checkmark.circle.fill", "Lint passed"),
+        ("xmark.circle.fill",     "E2E tests timed out after 60 minutes on staging"),
+        ("clock.fill",            "Waiting for approval"),
+        ("checkmark.circle.fill", "Release build complete — v2.4.1"),
+        ("arrow.clockwise",       "Retrying flaky snapshot test"),
+        ("xmark.circle.fill",     "Deploy failed: health check did not pass"),
+        ("checkmark.circle.fill", "OK"),
+        ("clock.fill",            "Pending dependency: upload-artifacts"),
+        ("checkmark.circle.fill", "Code signing passed"),
+        ("xmark.circle.fill",     "Notarisation rejected"),
+        ("arrow.clockwise",       "Scheduled nightly run"),
+        ("checkmark.circle.fill", "Delta upload done"),
+        ("clock.fill",            "In progress"),
+        ("xmark.circle.fill",     "Runner disconnected mid-job — investigate logs"),
+        ("checkmark.circle.fill", "Cache warmed"),
+        ("checkmark.circle.fill", "All checks passed — ready to merge"),
+    ]
 
-    private var visibleItems: [String] {
-        Array(appState.allMainItems.prefix(visibleCount))
+    @State private var visibleCount = 5
+
+    private var visibleItems: [(icon: String, label: String)] {
+        Array(allItems.prefix(visibleCount))
     }
 
     private var remainingCount: Int {
-        appState.allMainItems.count - visibleCount
+        allItems.count - visibleCount
     }
 
     var body: some View {
@@ -30,7 +58,7 @@ struct MainView: View {
             // Header
             HStack {
                 Text("MBK Example").font(.headline)
-                Spacer()
+                Spacer(minLength: 16)
                 Button("Settings →") {
                     print("[MainView] navigating to settings")
                     appState.route = .settings
@@ -43,30 +71,37 @@ struct MainView: View {
 
             Divider()
 
-            // Scrollable list — grows with content up to maxScrollHeight.
+            // Scrollable list. The inner VStack uses .fixedSize(horizontal: false, vertical: true)
+            // so it reports its full intrinsic height to the GeometryReader inside ScrollView,
+            // while width is driven by the outer .fixedSize() on the root VStack.
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(visibleItems.enumerated()), id: \.offset) { _, item in
-                        HStack {
-                            Image(systemName: "checkmark.circle").foregroundStyle(.green)
-                            Text(item).font(.caption)
-                            Spacer()
+                        HStack(spacing: 8) {
+                            Image(systemName: item.icon)
+                                .foregroundStyle(iconColor(item.icon))
+                                .font(.caption)
+                            Text(item.label)
+                                .font(.system(size: 12))
+                                .lineLimit(1)           // truncate at maxWidth, never wrap
+                                .truncationMode(.tail)
+                            Spacer(minLength: 12)
                         }
                         .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 7)
                         Divider().padding(.leading, 12)
                     }
 
-                    // Show more button — only visible when items remain.
+                    // Show more button — only when items remain.
                     if remainingCount > 0 {
+                        let batch = min(5, remainingCount)
                         Button {
-                            let next = min(4, remainingCount)
-                            print("[MainView] show more tapped — revealing \(next) items")
-                            visibleCount += next
+                            print("[MainView] show more tapped — revealing \(batch) items")
+                            visibleCount += batch
                         } label: {
-                            HStack {
+                            HStack(spacing: 4) {
                                 Image(systemName: "chevron.down").font(.caption2)
-                                Text("Show \(min(4, remainingCount)) more…").font(.caption)
+                                Text("Show \(batch) more…").font(.caption)
                             }
                             .foregroundStyle(.secondary)
                         }
@@ -75,15 +110,27 @@ struct MainView: View {
                         .padding(.vertical, 8)
                     }
                 }
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxHeight: maxScrollHeight)
         }
-        .frame(width: 260)
+        // No fixed width — content-driven. .fixedSize() makes the root VStack
+        // report its intrinsic size so preferredContentSize KVO fires correctly.
+        // PopoverController clamps the result to [minWidth, maxWidth] x maxHeight.
+        .fixedSize()
         .onAppear {
-            print("[MainView] onAppear items=\(appState.allMainItems.count) visible=\(visibleCount)")
+            print("[MainView] onAppear visibleCount=\(visibleCount)")
         }
         .onDisappear {
             print("[MainView] onDisappear")
+        }
+    }
+
+    private func iconColor(_ systemName: String) -> Color {
+        switch systemName {
+        case "checkmark.circle.fill": return .green
+        case "xmark.circle.fill":     return .red
+        case "clock.fill":            return .orange
+        default:                      return .blue
         }
     }
 }
