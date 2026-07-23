@@ -215,18 +215,6 @@ public final class MBKPopoverController: NSObject {
         guard clamped.width > 0, clamped.height > 0 else { return }
 
         let currentSize = popover.contentSize
-        let chrome = chromeHeight ?? 0
-        let actualCurrentH = popover.isShown
-            ? (hostingController.view.window?.frame.height ?? currentSize.height) - chrome
-            : currentSize.height
-
-        // No-op guard uses actualCurrentH so a clamped overflow doesn't cause
-        // a false-positive skip on the next resize.
-        guard abs(currentSize.width - clamped.width) > 1
-           || abs(actualCurrentH - clamped.height) > 1 else {
-            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
-            return
-        }
 
         guard popover.isShown, let window = hostingController.view.window else {
             popover.contentSize = clamped
@@ -241,15 +229,20 @@ public final class MBKPopoverController: NSObject {
             chromeHeight = window.frame.height - currentSize.height
             mbkLog("PopoverController", "applyContentSize — chromeHeight measured: \(chromeHeight!)")
         }
-        let resolvedChrome = chromeHeight ?? 0
-        let resolvedActualCurrentH = window.frame.height - resolvedChrome
+        let actualCurrentH = window.frame.height - (chromeHeight ?? 0)
+
+        guard abs(currentSize.width - clamped.width) > 1
+           || abs(actualCurrentH - clamped.height) > 1 else {
+            mbkLog("PopoverController", "applyContentSize — no-op: size unchanged")
+            return
+        }
 
         let dw = clamped.width - currentSize.width
-        let dh = clamped.height - resolvedActualCurrentH
+        let dh = clamped.height - actualCurrentH
 
         mbkLog("PopoverController",
                "applyContentSize — (\(currentSize.width),\(currentSize.height))→"
-               + "(\(clamped.width),\(clamped.height)) actualCurrentH=\(resolvedActualCurrentH) dw=\(dw) dh=\(dh)")
+               + "(\(clamped.width),\(clamped.height)) actualCurrentH=\(actualCurrentH) dw=\(dw) dh=\(dh)")
 
         popover.contentSize = clamped
 
