@@ -1,6 +1,4 @@
-// PopoverController.swift — DEBUG: NO VEV, NO GLASS
-// hostingController.view is panel.contentView directly.
-// If panel is still grey, the hosting view itself is the grey source.
+// PopoverController.swift
 import AppKit
 import SwiftUI
 
@@ -115,13 +113,25 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // DEBUG: hostingController.view directly as panel.contentView.
-        // No NSGlassEffectView, no NSVisualEffectView.
-        // If still grey — the hosting view itself is the grey source.
+        // NSGlassEffectView is the panel's contentView.
+        // SwiftUI hosting view goes inside glassView.contentView.
+        // The transparent panel lets the glass lens real screen content.
+        let glassView = NSGlassEffectView(frame: NSRect(origin: .zero, size: initialSize))
+        glassView.cornerRadius = 12
+        glassView.autoresizingMask = [.width, .height]
+
         let hostingView = hostingController.view
-        hostingView.wantsLayer = true
-        hostingView.layer?.backgroundColor = .clear
-        panel.contentView = hostingView
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        glassView.contentView = hostingView
+
+        NSLayoutConstraint.activate([
+            hostingView.leadingAnchor.constraint(equalTo: glassView.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: glassView.trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: glassView.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: glassView.bottomAnchor),
+        ])
+
+        panel.contentView = glassView
 
         mbkLog("PopoverController", "setup complete")
     }
