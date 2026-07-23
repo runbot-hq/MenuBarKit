@@ -62,6 +62,16 @@
 //      Pinned to fill clipView. Provides the Tahoe liquid-glass material.
 //      hostingController.view is assigned to its contentView property.
 //
+// HOSTING CONTROLLER VIEW TRANSPARENCY:
+//   NSHostingController creates its NSView with an opaque system background
+//   at the AppKit layer. SwiftUI's .background(.clear) does NOT reach this
+//   AppKit layer — it only affects SwiftUI's own render tree above it.
+//   We must explicitly zero the CALayer background on the hosting view:
+//     hostingController.view.wantsLayer = true
+//     hostingController.view.layer?.backgroundColor = .clear
+//   Without this, the hosting view paints a solid grey rect inside
+//   NSGlassEffectView, completely blocking glass refraction.
+//
 // ROUNDED CORNERS — HISTORY:
 //   Approaches tried and rejected (ALL regress to rect corners on sheet open):
 //   1. NSVisualEffectView.cornerRadius / masksToBounds  → reset by addChildWindow()
@@ -228,6 +238,15 @@ public final class MBKPopoverController: NSObject {
     private func setupPanel() {
         hostingController = NSHostingController(rootView: pendingRootView)
         hostingController.sizingOptions = .preferredContentSize
+
+        // !! TRANSPARENCY — DO NOT REMOVE !!
+        // NSHostingController creates its NSView with an opaque system background
+        // at the AppKit CALayer level. SwiftUI's .background(.clear) does NOT reach
+        // this layer. We must zero it explicitly here or the hosting view paints a
+        // solid grey rect inside NSGlassEffectView, blocking all glass refraction.
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.backgroundColor = .clear
+
         mbkLog("PopoverController", "setupPanel — sizingOptions=.preferredContentSize")
 
         sizeObservation = hostingController.observe(
@@ -288,6 +307,11 @@ public final class MBKPopoverController: NSObject {
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         let glassView = NSGlassEffectView()
         glassView.style = .regular
+        // !! TRANSPARENCY — DO NOT REMOVE !!
+        // NSGlassEffectView may contribute an opaque sublayer behind contentView.
+        // Zero it so the glass compositor sees through to the desktop.
+        glassView.wantsLayer = true
+        glassView.layer?.backgroundColor = .clear
         glassView.contentView = hostingController.view  // ← .contentView, NOT addSubview
         glassView.translatesAutoresizingMaskIntoConstraints = false
         clipView.addSubview(glassView)
