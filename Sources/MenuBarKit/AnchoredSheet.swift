@@ -12,25 +12,24 @@
 //   When a borderless window that is not the popover window becomes key, wire it
 //   as a child of the popover window via addChildWindow(_:ordered:).
 //   This ties the gate and anchoring to the actual AppKit window lifecycle
-//   rather than to SwiftUI's binding state, eliminating the GCD hop and the
-//   DISMISS-SAFETY GAP from the spike.
+//   rather than to SwiftUI's binding state.
 //
 // GATE:
 //   MBKOverlayGate is read from the SwiftUI environment (@Environment).
 //   The host app injects it once at the root view via .environment(overlayGate).
 //   No overlayGate: parameter is needed at each call site.
 //
-// SHEET WINDOW DISCRIMINATOR — why .borderless && not popoverWindow:
-//   The sheet window is matched by: not the popover window and borderless styleMask.
-//   isKeyWindow is implicit — we receive the notification only when the window
-//   becomes key. The popover window is .nonactivatingPanel (not .borderless),
-//   so excluding it by identity is sufficient.
+// NOTIFICATION CLOSURE ISOLATION:
+//   NotificationCenter delivers callbacks on a Sendable (nonisolated) closure.
+//   Accessing @MainActor-isolated state (NSWindow.styleMask, MBKSheetAnchorTask.finish)
+//   requires hopping back to the main actor via Task { @MainActor in }.
+//   The hop is safe: the notification is always posted on the main queue (.main),
+//   so the Task body runs almost immediately with no observable latency.
 //
-// CANCELLATION PATH — early sheet dismiss before window becomes key:
-//   waitForSheetWindow() stores the continuation in MBKSheetAnchorTask.
+// CANCELLATION PATH:
 //   If the sheet binding flips back to false before the window becomes key,
-//   the caller cancels via cancel() which resumes the continuation with nil
-//   and removes the observer. This prevents the continuation from leaking.
+//   the caller calls cancel() which resumes the continuation with nil and
+//   removes the observer. This prevents the continuation from leaking.
 //
 // DISMISS-SAFETY:
 //   Gate is cleared in onChange(false) synchronously. addChildWindow removal
@@ -79,18 +78,25 @@ final class MBKSheetAnchorTask {
             guard let self else { return }
             let window = await withCheckedContinuation { (cont: CheckedContinuation<NSWindow?, Never>) in
                 self.continuation = cont
+                // Capture only the identity of popoverWindow so the Sendable
+                // closure does not close over any @MainActor state.
+                let popoverWindow = self.popoverWindow
                 self.observer = NotificationCenter.default.addObserver(
                     forName: NSWindow.didBecomeKeyNotification,
                     object: nil,
                     queue: .main
                 ) { [weak self] notification in
-                    guard let self else { return }
-                    guard
-                        let window = notification.object as? NSWindow,
-                        window !== self.popoverWindow,
-                        window.styleMask.contains(.borderless)
-                    else { return }
-                    self.finish(with: window)
+                    // NotificationCenter delivers on a Sendable closure.
+                    // Hop to @MainActor to access NSWindow.styleMask and finish().
+                    Task { @MainActor [weak self] in
+                        guard
+                            let self,
+                            let window = notification.object as? NSWindow,
+                            window !== popoverWindow,
+                            window.styleMask.contains(.borderless)
+                        else { return }
+                        self.finish(with: window)
+                    }
                 }
             }
             guard let window else {
