@@ -39,11 +39,6 @@
 //      NSPopover. Use GeometryReader + onChange (see setupPopover()).
 //
 //   ⚠️  NEVER call show() with a degenerate positioningRect.
-//
-//   ⚠️  LAYOUT BEFORE FITTING: always call layoutSubtreeIfNeeded() before
-//      reading fittingSize. Without it SwiftUI returns a stale size from
-//      the previous layout pass (e.g. header-only 33pt) because the
-//      hosting view has not yet measured the current content.
 
 import AppKit
 import SwiftUI
@@ -117,13 +112,6 @@ public final class MBKPopoverController: NSObject {
     private func openPopover() {
         guard let button = statusItem.button else { return }
 
-        // Force a synchronous layout pass before reading fittingSize.
-        // Without this, fittingSize reflects the previous layout (e.g.
-        // header-only 33pt) because SwiftUI hasn't measured the current
-        // content yet. layoutSubtreeIfNeeded() drives a full measure pass
-        // so fittingSize returns the correct full-content height.
-        hostingController.view.layoutSubtreeIfNeeded()
-
         let fitting = hostingController.view.fittingSize
         if fitting.width > 0, fitting.height > 0 {
             popover.contentSize = fitting
@@ -137,8 +125,8 @@ public final class MBKPopoverController: NSObject {
         startEventMonitor()
     }
 
-    /// Returns a 1pt-wide positioningRect centered on the button's midX.
-    /// Returns nil if button.bounds is degenerate (zero width/height).
+    /// Returns a fresh positioningRect derived from the button's CURRENT
+    /// bounds, or nil if those bounds are degenerate (zero width/height).
     private func positioningRect(for button: NSStatusBarButton) -> NSRect? {
         let bounds = button.bounds
         guard bounds.width > 0, bounds.height > 0 else {
@@ -177,7 +165,7 @@ public final class MBKPopoverController: NSObject {
         popover.delegate = self
     }
 
-    /// Applies a new preferred content size to the popover.
+    /// Applies a new preferred content size.
     ///
     /// Sets popover.contentSize, then corrects the window origin by the
     /// size delta so midX and maxY stay pinned — compensating for AppKit's
@@ -198,6 +186,9 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
+        // Capture current window origin BEFORE mutating contentSize.
+        // AppKit repositions the window as a side-effect of contentSize change,
+        // so we must read first, then write, then correct.
         let oldFrame = window.frame
         let dw = preferred.width - currentSize.width
         let dh = preferred.height - currentSize.height
@@ -208,6 +199,9 @@ public final class MBKPopoverController: NSObject {
 
         popover.contentSize = preferred
 
+        // Shift origin to keep midX and maxY fixed:
+        //   origin.x -= dw/2  → window grows/shrinks symmetrically around center
+        //   origin.y -= dh    → window grows/shrinks downward, top edge stays put
         var newOrigin = oldFrame.origin
         newOrigin.x -= dw / 2
         newOrigin.y -= dh

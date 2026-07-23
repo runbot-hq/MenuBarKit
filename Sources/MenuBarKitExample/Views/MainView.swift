@@ -1,43 +1,27 @@
 // MainView.swift
 // MenuBarKitExample
-//
-// Uses a plain VStack (no ScrollView) so fittingSize reports correct full
-// height before the view is attached to a window.
-// Width=260 vs Settings width=320 exercises arrow centering on nav.
 
-import AppKit
 import SwiftUI
 
+/// Landing view shown on first popover open. Navigates to `SettingsView`.
+///
+/// Intentionally uses a DIFFERENT width (260) than SettingsView (320) to
+/// exercise PopoverController's dynamic-width arrow centering fix (see
+/// positioningRect re-assignment, guarded against degenerate button bounds,
+/// in applyContentSize()).
 struct MainView: View {
+    /// App state injected from the environment.
     @Environment(AppState.self) private var appState
 
+    /// The main view body — a single Settings button.
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("MBK Example").font(.headline)
-                Spacer()
-                Button("Settings →") { appState.route = .settings }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-
-            Divider()
-
-            ForEach(appState.mainItems, id: \.self) { item in
-                HStack {
-                    Image(systemName: "checkmark.circle").foregroundStyle(.green)
-                    Text(item).font(.caption)
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                Divider().padding(.leading, 12)
-            }
+        VStack(spacing: 12) {
+            Button("Settings →") { appState.route = .settings }
+                .buttonStyle(.borderedProminent)
         }
+        .padding(16)
         .frame(width: 260)
-        .fixedSize(horizontal: true, vertical: false)
-        .onAppear { print("[MainView] onAppear") }
+        .onAppear    { print("[MainView] onAppear") }
+        .onDisappear { print("[MainView] onDisappear") }
     }
 }
