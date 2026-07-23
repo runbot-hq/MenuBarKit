@@ -1,16 +1,10 @@
 // MainView.swift
 // MenuBarKitExample
 //
-// Demonstrates dynamic height growth via a "Show more" button AND
-// dynamic width cycling via a "←→" button in the header.
-//
-// Width cycle: 200 → 260 → 320 → 420 → (wrap) 200
-// This exercises the preferredContentSize KVO path in PopoverController
-// for both axes — the panel reflows width live without re-anchoring.
-//
-// Height growth: "Show more" reveals items 4 at a time.
-// preferredContentSize KVO in PopoverController picks up every size
+// Demonstrates dynamic height growth via a "Show more" button.
+// preferredContentSize KVO in PopoverController picks up every height
 // change and resizes + recenters the popover automatically.
+// Width = 260 (narrower than Settings 320) exercises arrow-centering on nav.
 
 import AppKit
 import SwiftUI
@@ -18,17 +12,6 @@ import SwiftUI
 struct MainView: View {
     @Environment(AppState.self) private var appState
     @State private var visibleCount: Int = 4
-    @State private var widthIndex: Int = 1  // default = 260 (index 1)
-
-    private static let widthSteps: [CGFloat] = [200, 260, 320, 420]
-
-    private var currentWidth: CGFloat {
-        Self.widthSteps[widthIndex]
-    }
-
-    private var nextWidth: CGFloat {
-        Self.widthSteps[(widthIndex + 1) % Self.widthSteps.count]
-    }
 
     private var maxScrollHeight: CGFloat {
         (NSScreen.main?.visibleFrame.height ?? 800) * 0.80
@@ -48,19 +31,6 @@ struct MainView: View {
             HStack {
                 Text("MBK Example").font(.headline)
                 Spacer()
-                // Width-cycle button — steps through widthSteps on each tap.
-                Button {
-                    let next = (widthIndex + 1) % Self.widthSteps.count
-                    print("[MainView] width cycle: \(currentWidth) → \(Self.widthSteps[next])")
-                    widthIndex = next
-                } label: {
-                    Label("\(Int(nextWidth))pt", systemImage: "arrow.left.and.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Cycle panel width (tests dynamic resize)")
-
                 Button("Settings →") {
                     print("[MainView] navigating to settings")
                     appState.route = .settings
@@ -108,10 +78,9 @@ struct MainView: View {
             }
             .frame(maxHeight: maxScrollHeight)
         }
-        .frame(width: currentWidth)  // driven by widthIndex
-        .animation(.easeInOut(duration: 0.18), value: currentWidth)
+        .frame(width: 260)
         .onAppear {
-            print("[MainView] onAppear items=\(appState.allMainItems.count) visible=\(visibleCount) width=\(currentWidth)")
+            print("[MainView] onAppear items=\(appState.allMainItems.count) visible=\(visibleCount)")
         }
         .onDisappear {
             print("[MainView] onDisappear")
