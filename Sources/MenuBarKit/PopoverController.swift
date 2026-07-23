@@ -39,6 +39,17 @@
 //      NSPopover. Use GeometryReader + onChange (see setupPopover()).
 //
 //   ⚠️  NEVER call show() with a degenerate positioningRect.
+//
+//   ⚠️  CLAMP + fixedSize() GOTCHA:
+//      When maxHeight clamps contentSize but the root view has .fixedSize(),
+//      SwiftUI renders at its full intrinsic height (e.g. 637) even though
+//      contentSize is 600. The window.frame.height reflects the true rendered
+//      height, not contentSize. Using popover.contentSize.height as the
+//      "current" height for delta math therefore produces a wrong dh on the
+//      next resize, shifting origin.y by the overflow amount (e.g. 37pt).
+//      FIX: derive actualCurrentH from window.frame using the chrome constant
+//      (chromeH = window.frame.height - popover.contentSize.height, measured
+//      before any clamp overflow occurs), then dh = clamped.height - actualCurrentH.
 
 import AppKit
 import SwiftUI
@@ -66,6 +77,13 @@ public final class MBKPopoverController: NSObject {
     private var isSetUp = false
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
+
+    /// Cached chrome height (window.frame.height - popover.contentSize.height).
+    /// Constant for the lifetime of the popover. Measured on first applyContentSize
+    /// call where both window and contentSize are valid and no clamp overflow has
+    /// occurred yet. Used to derive the true rendered content height from the window
+    /// frame when contentSize may have been clamped.
+    private var chromeHeight: CGFloat?
 
     // MARK: - Init
 
@@ -191,6 +209,11 @@ public final class MBKPopoverController: NSObject {
     /// size delta so midX and maxY stay pinned — compensating for AppKit's
     /// default grow-from-bottom-left behaviour without mixing content and
     /// chrome coordinate spaces.
+    ///
+    /// dh is computed from the actual window frame height (via chromeHeight),
+    /// not from popover.contentSize, because fixedSize() can cause SwiftUI to
+    /// render taller than contentSize when clamped — making contentSize an
+    /// unreliable reference for the true current window height.
     private func applyContentSize(_ preferred: CGSize) {
         let clamped = clamp(preferred)
         guard clamped.width > 0, clamped.height > 0 else { return }
@@ -208,12 +231,24 @@ public final class MBKPopoverController: NSObject {
         }
 
         let oldFrame = window.frame
+
+        // Measure chrome once — the constant offset between window.frame.height
+        // and popover.contentSize.height. Valid only when there is no clamp overflow
+        // yet (i.e. contentSize.height == actual rendered height). After that,
+        // use it to derive the true current content height from the window frame.
+        if chromeHeight == nil {
+            chromeHeight = oldFrame.height - currentSize.height
+            mbkLog("PopoverController", "applyContentSize — chromeHeight measured: \(chromeHeight!)")
+        }
+        let chrome = chromeHeight ?? 0
+        let actualCurrentH = oldFrame.height - chrome
+
         let dw = clamped.width - currentSize.width
-        let dh = clamped.height - currentSize.height
+        let dh = clamped.height - actualCurrentH
 
         mbkLog("PopoverController",
                "applyContentSize — (\(currentSize.width),\(currentSize.height))→"
-               + "(\(clamped.width),\(clamped.height)) dw=\(dw) dh=\(dh)")
+               + "(\(clamped.width),\(clamped.height)) actualCurrentH=\(actualCurrentH) dw=\(dw) dh=\(dh)")
 
         popover.contentSize = clamped
 
@@ -298,6 +333,7 @@ extension MBKPopoverController: NSPopoverDelegate {
         mbkLog("PopoverController", "popoverDidClose")
         setButtonHighlight(false)
         stopEventMonitor()
+        chromeHeight = nil  // reset so it's re-measured on next open
         overlayGate.hasActiveOverlay = false
         mbkLog("PopoverController", "overlay gate reset on close")
     }
