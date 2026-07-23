@@ -63,6 +63,16 @@ public final class MBKPopoverController: NSObject {
     /// Maximum height the popover will grow to. Content taller than this is scrollable.
     private let maxHeight: CGFloat
 
+    // MARK: - Session hooks
+
+    /// Called in openPopover() before popover.show(). Use to restore session state
+    /// (e.g. active route, open sheets) so the popover respawns into the correct hierarchy.
+    public var onWillShow: (() -> Void)?
+
+    /// Called at the end of popoverDidClose, after all cleanup. Use to snapshot
+    /// session state so it can be restored on the next open.
+    public var onDidClose: (() -> Void)?
+
     // MARK: - Owned objects
 
     private var statusItem: NSStatusItem!
@@ -133,6 +143,9 @@ public final class MBKPopoverController: NSObject {
 
     private func openPopover() {
         guard let button = statusItem.button else { return }
+
+        onWillShow?()
+        mbkLog("PopoverController", "onWillShow fired")
 
         let fitting = hostingController.view.fittingSize
         if fitting.width > 0, fitting.height > 0 {
@@ -316,5 +329,7 @@ extension MBKPopoverController: NSPopoverDelegate {
         anchorPoint = nil
         overlayGate.hasActiveOverlay = false
         mbkLog("PopoverController", "overlay gate reset on close")
+        onDidClose?()
+        mbkLog("PopoverController", "onDidClose fired")
     }
 }
