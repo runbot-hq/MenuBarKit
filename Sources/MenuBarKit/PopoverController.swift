@@ -19,9 +19,10 @@
 //
 // VISUAL CHROME:
 //   NSPanel(.borderless) has no chrome. We add an NSVisualEffectView
-//   with .liquidGlass material (macOS 26+) as the panel's contentView,
-//   then embed the NSHostingController view inside it. .liquidGlass
-//   produces the Tahoe liquid-glass look used by system menu-bar panels.
+//   with the liquidGlass material (macOS 26+, raw value 33) as the
+//   panel's contentView. This produces the Tahoe liquid-glass look used
+//   by system menu-bar panels. The named symbol .liquidGlass is not yet
+//   in the Swift SDK; the raw value is stable.
 //
 // ROUNDED CORNERS — WHY maskImage, NOT cornerRadius/masksToBounds/CAShapeLayer:
 //   Three approaches were tried and rejected:
@@ -93,6 +94,10 @@ public final class MBKPopoverController: NSObject {
     private var anchorY: CGFloat = 0
 
     private let cornerRadius: CGFloat = 12
+
+    // liquidGlass material raw value for macOS 26+.
+    // The named symbol .liquidGlass is not yet in the Swift SDK.
+    private let liquidGlassMaterial = NSVisualEffectView.Material(rawValue: 33)!
 
     // MARK: - Init
 
@@ -227,9 +232,9 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // .liquidGlass is the Tahoe material for system menu-bar panels.
+        // liquidGlass material (raw value 33) — Tahoe liquid-glass look.
         let visualEffect = NSVisualEffectView()
-        visualEffect.material = .liquidGlass
+        visualEffect.material = liquidGlassMaterial
         visualEffect.blendingMode = .behindWindow
         visualEffect.state = .active
         visualEffect.wantsLayer = true
