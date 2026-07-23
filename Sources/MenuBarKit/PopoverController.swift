@@ -113,8 +113,8 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
+        // NSGlassEffectView public API: contentView, cornerRadius, tintColor only.
         let glassView = NSGlassEffectView(frame: NSRect(origin: .zero, size: initialSize))
-        glassView.material = .clear
         glassView.cornerRadius = 12
         glassView.autoresizingMask = [.width, .height]
 
