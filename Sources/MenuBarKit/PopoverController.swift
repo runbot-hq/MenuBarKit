@@ -27,6 +27,12 @@
 //   intermediate layout frame (e.g. SwiftUI emitting width before height
 //   on a route transition). NSPanel.setFrame() has no such constraint.
 //
+// VISUAL CHROME:
+//   NSPanel(.borderless) has no chrome. We add an NSVisualEffectView
+//   with .popover material as the panel's contentView, then embed
+//   the NSHostingController view inside it. This reproduces the standard
+//   macOS popover glass background + corner radius without NSPopover.
+//
 // SHEETS / OVERLAY GATE:
 //   MBKAnchoredSheet renders as an overlay inside the same NSHostingController.
 //   MBKOverlayGate blocks panel close while an overlay is active.
@@ -55,7 +61,6 @@ public final class MBKPopoverController: NSObject {
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
 
     /// X midpoint of the status button in screen coordinates, captured at open time.
-    /// Used to re-center the panel on every resize without re-reading the button.
     private var anchorX: CGFloat = 0
     /// Bottom edge of the status button in screen coordinates, captured at open time.
     private var anchorY: CGFloat = 0
@@ -117,8 +122,6 @@ public final class MBKPopoverController: NSObject {
             return
         }
 
-        // Capture anchor in screen coordinates once at open time.
-        // Convert button bounds origin to screen coords via the button's window.
         let buttonRectInWindow = button.convert(button.bounds, to: nil)
         let buttonRectOnScreen = button.window?.convertToScreen(buttonRectInWindow)
             ?? NSRect(x: screen.frame.midX, y: screen.visibleFrame.maxY, width: 0, height: 0)
@@ -126,7 +129,6 @@ public final class MBKPopoverController: NSObject {
         anchorY = buttonRectOnScreen.minY
         mbkLog("PopoverController", "openPanel — anchor=(\(anchorX),\(anchorY))")
 
-        // Position panel at current size, centered on anchorX, top at anchorY.
         let size = panel.frame.size
         let origin = NSPoint(
             x: anchorX - size.width / 2,
@@ -160,8 +162,6 @@ public final class MBKPopoverController: NSObject {
 
     private func setupPanel() {
         hostingController = NSHostingController(rootView: pendingRootView)
-        // .preferredContentSize: SwiftUI reports ideal size on every layout pass.
-        // KVO observer below calls applyContentSize whenever it changes.
         hostingController.sizingOptions = .preferredContentSize
         mbkLog("PopoverController", "setupPanel — sizingOptions=.preferredContentSize")
 
@@ -176,9 +176,6 @@ public final class MBKPopoverController: NSObject {
             }
         }
 
-        // NSPanel styled as a borderless, non-activating floating panel.
-        // .popUpMenu level sits above normal windows and the menu bar overlay.
-        // .nonactivatingPanel: clicking the panel does not steal app focus.
         panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: initialSize),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -189,14 +186,34 @@ public final class MBKPopoverController: NSObject {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.contentViewController = hostingController
+
+        // NSVisualEffectView provides the standard macOS popover glass
+        // background (frosted, rounded corners) that NSPopover gave for free.
+        let visualEffect = NSVisualEffectView()
+        visualEffect.material = .popover
+        visualEffect.blendingMode = .behindWindow
+        visualEffect.state = .active
+        visualEffect.wantsLayer = true
+        visualEffect.layer?.cornerRadius = 10
+        visualEffect.layer?.masksToBounds = true
+
+        // Embed the SwiftUI hosting view inside the visual effect view.
+        let contentView = hostingController.view
+        contentView.translatesAutoresizingMaskIntoConstraints = false
+        visualEffect.addSubview(contentView)
+        NSLayoutConstraint.activate([
+            contentView.topAnchor.constraint(equalTo: visualEffect.topAnchor),
+            contentView.bottomAnchor.constraint(equalTo: visualEffect.bottomAnchor),
+            contentView.leadingAnchor.constraint(equalTo: visualEffect.leadingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: visualEffect.trailingAnchor),
+        ])
+
+        panel.contentView = visualEffect
         mbkLog("PopoverController", "setupPanel — initialSize=(\(initialSize.width),\(initialSize.height))")
     }
 
     /// Applies a new content size from SwiftUI's preferredContentSize KVO.
-    ///
-    /// Recomputes the full panel frame from anchorX/anchorY and the new size.
-    /// No delta math — setFrame is unconditional and jump-free.
+    /// Recomputes the full panel frame from anchorX/anchorY — no delta math.
     private func applyContentSize(_ preferred: CGSize) {
         guard preferred.width > 0, preferred.height > 0 else {
             mbkLog("PopoverController", "applyContentSize — skipped: degenerate (\(preferred.width),\(preferred.height))")
@@ -210,14 +227,11 @@ public final class MBKPopoverController: NSObject {
         }
 
         guard panel.isVisible else {
-            // Panel not shown yet — just resize in place so openPanel() uses
-            // the correct size when it positions the frame.
             panel.setContentSize(preferred)
             mbkLog("PopoverController", "applyContentSize — not visible, pre-sized to (\(preferred.width),\(preferred.height))")
             return
         }
 
-        // Recompute frame from stored anchor — no delta, no drift.
         let newOrigin = NSPoint(
             x: round(anchorX - preferred.width / 2),
             y: round(anchorY - preferred.height)
