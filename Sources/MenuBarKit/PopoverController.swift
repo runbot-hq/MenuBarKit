@@ -19,10 +19,9 @@
 //
 // VISUAL CHROME:
 //   NSPanel(.borderless) has no chrome. We add an NSVisualEffectView
-//   with .hudWindow material as the panel's contentView, then embed
-//   the NSHostingController view inside it. .hudWindow gives the deep
-//   dark background used by modern menu-bar apps regardless of the
-//   system appearance.
+//   with .liquidGlass material (macOS 26+) as the panel's contentView,
+//   then embed the NSHostingController view inside it. .liquidGlass
+//   produces the Tahoe liquid-glass look used by system menu-bar panels.
 //
 // ROUNDED CORNERS — WHY maskImage, NOT cornerRadius/masksToBounds/CAShapeLayer:
 //   Three approaches were tried and rejected:
@@ -57,6 +56,11 @@
 // SHEETS / OVERLAY GATE:
 //   MBKAnchoredSheet renders as an overlay inside the same NSHostingController.
 //   MBKOverlayGate blocks panel close while an overlay is active.
+//
+// STATUS BUTTON HIGHLIGHT:
+//   button.highlight(true/false) is the correct API for keeping the status
+//   item visually selected while the panel is open. isHighlighted drops when
+//   the panel takes key status; highlight() does not.
 
 import AppKit
 import SwiftUI
@@ -163,8 +167,7 @@ public final class MBKPopoverController: NSObject {
         mbkLog("PopoverController", "openPanel — anchor=(\(anchorX),\(anchorY))")
 
         let size = panel.frame.size
-        let rawX = anchorX
-        let clampedX = min(rawX, screen.visibleFrame.maxX - size.width)
+        let clampedX = min(anchorX, screen.visibleFrame.maxX - size.width)
         let origin = NSPoint(
             x: max(clampedX, screen.visibleFrame.minX),
             y: anchorY - size.height
@@ -189,8 +192,10 @@ public final class MBKPopoverController: NSObject {
         mbkLog("PopoverController", "closePanel — closed")
     }
 
+    /// highlight() keeps the status icon visually selected while the panel is open.
+    /// isHighlighted drops when the panel takes key status; highlight() does not.
     private func setButtonHighlight(_ on: Bool) {
-        statusItem.button?.isHighlighted = on
+        statusItem.button?.highlight(on)
     }
 
     // MARK: - Panel setup
@@ -222,9 +227,9 @@ public final class MBKPopoverController: NSObject {
         panel.backgroundColor = .clear
         panel.hasShadow = true
 
-        // .hudWindow gives the deep dark background used by modern menu-bar apps.
+        // .liquidGlass is the Tahoe material for system menu-bar panels.
         let visualEffect = NSVisualEffectView()
-        visualEffect.material = .hudWindow
+        visualEffect.material = .liquidGlass
         visualEffect.blendingMode = .behindWindow
         visualEffect.state = .active
         visualEffect.wantsLayer = true
