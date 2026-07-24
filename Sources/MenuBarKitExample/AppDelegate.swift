@@ -2,13 +2,17 @@
 // MenuBarKitExample
 //
 // SESSION RESPAWN — hook split:
-//   onWillShow       → restore route + reset isSheetPresented=false.
-//                       Fires before popover.show() so the view renders clean.
-//   onDidShow        → restore isSheetPresented from snapshot.
-//                       Fires after show() — produces a genuine false→true
-//                       transition that SwiftUI presents the sheet for.
-//   onDidClose       → save snapshot with sheet=false (normal close).
-//   onWillForceClose → save snapshot from live AppState (sheet genuinely open).
+//   onWillShow       → restore route only. No isSheetPresented touch —
+//                       SwiftUI resets it to false when the popover closes,
+//                       so onDidShow gets a genuine false→true transition.
+//   onDidShow        → restore isSheetPresented from snapshot via Task hop.
+//                       Popover window exists at this point.
+//   onDidClose       → saveSnapshot() from live AppState — captures
+//                       isSheetPresented correctly (SwiftUI has reset it
+//                       to false by the time this fires on normal close;
+//                       on force-close onWillForceClose already saved it).
+//   onWillForceClose → saveSnapshot() BEFORE gate cleared and BEFORE
+//                       isSheetPresented resets — captures sheet=true.
 
 import AppKit
 import MenuBarKit
@@ -29,14 +33,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         popoverController.setup()
 
+        // Restore route only — do NOT touch isSheetPresented here.
+        // SwiftUI resets isSheetPresented=false when the popover view
+        // disappears on close, so onDidShow will get a genuine false→true.
         popoverController.onWillShow = { [weak self] in
             guard let self, let snap = lastSession else { return }
             appState.route = snap.route
-            // Reset to false before render so SwiftUI doesn't fire a
-            // spurious onChange(true) from stale state. onDidShow sets
-            // the real value after the popover window exists.
-            appState.isSheetPresented = false
-            print("[AppDelegate] route restored: \(snap.route), isSheetPresented reset to false")
+            print("[AppDelegate] route restored: \(snap.route)")
         }
 
         popoverController.onDidShow = { [weak self] in
@@ -45,23 +48,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             print("[AppDelegate] isSheetPresented restored: \(snap.isSheetPresented)")
         }
 
-        // Normal close — sheet never open here.
         popoverController.onDidClose = { [weak self] in
             guard let self else { return }
-            let snap = AppState.SessionSnapshot(route: appState.route, isSheetPresented: false)
-            lastSession = snap
-            print("[AppDelegate] session saved: route=\(snap.route) sheet=false")
+            lastSession = appState.saveSnapshot()
+            print("[AppDelegate] session saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
         }
 
-        // Force-close — sheet IS open. Save live state before teardown.
         popoverController.onWillForceClose = { [weak self] in
             guard let self else { return }
             lastSession = appState.saveSnapshot()
             print("[AppDelegate] session force-saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
         }
     }
-
-    // MARK: - Private
 
     private let appState = AppState()
     private let overlayGate = MBKOverlayGate()
