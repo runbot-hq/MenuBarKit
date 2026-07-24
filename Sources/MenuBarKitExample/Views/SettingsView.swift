@@ -1,11 +1,5 @@
 // SettingsView.swift
 // MenuBarKitExample
-//
-// Exercises all three scenarios:
-//
-//   Scenario 1 — Sheet anchors + blocks outside-click dismiss
-//   Scenario 2 — File picker from popover level
-//   Scenario 3 — Alert from popover level
 
 import MenuBarKit
 import SwiftUI
@@ -23,7 +17,7 @@ struct SettingsView: View {
 
             Toggle("Show wide row", isOn: $showWideRow)
             if showWideRow {
-                Text("\u2190 this row is intentionally wide to drive a horizontal resize \u2192")
+                Text("← this row is intentionally wide to drive a horizontal resize →")
                     .font(.system(size: 11, design: .monospaced))
                     .fixedSize()
                     .foregroundStyle(.secondary)
@@ -67,7 +61,7 @@ struct SettingsView: View {
             }
 
             Divider()
-            Button("\u2190 Back") { appState.route = .main }
+            Button("← Back") { appState.route = .main }
                 .frame(maxWidth: .infinity, alignment: .center)
         }
         .padding(16)
