@@ -94,6 +94,9 @@ public final class MBKPopoverController: NSObject, MBKPopoverControllerProtocol 
         mbkLog("PopoverController", "popover shown")
         startEventMonitor()
 
+        // Hop to next actor turn — not a full SwiftUI render cycle, but enough
+        // for the hosting controller's view tree to have a window before the
+        // host restores sheet state via onDidShow.
         Task { @MainActor in
             mbkLog("PopoverController", "onDidShow Task hop -- calling onDidShow")
             self.onDidShow?()
@@ -211,6 +214,10 @@ public final class MBKPopoverController: NSObject, MBKPopoverControllerProtocol 
         mbkLog("PopoverController",
                "applyContentSize -- (\(popover.contentSize.width),\(popover.contentSize.height))->(\(clamped.width),\(clamped.height))")
         popover.contentSize = clamped
+        // anchor.x is the chrome midpoint from show-time. window.frame.width is read
+        // AFTER popover.contentSize = clamped, so AppKit has already updated the frame
+        // width synchronously. The subtraction is always against the current width —
+        // no horizontal drift on route switches that change both width and height.
         let newOrigin = NSPoint(x: anchor.x - window.frame.width / 2, y: anchor.y - window.frame.height)
         window.setFrameOrigin(newOrigin)
         mbkLog("PopoverController", "applyContentSize -- origin set to \(newOrigin)")
@@ -291,6 +298,9 @@ extension MBKPopoverController: NSPopoverDelegate {
             mbkLog("PopoverController", "popoverWillShow -- no hostingWindow yet")
             return
         }
+        // anchorPoint is nil until this fires, so applyContentSize takes the
+        // `not shown` branch (guard let anchor = anchorPoint) on any size event
+        // before this point. No stale frame is ever used as an anchor.
         anchorPoint = NSPoint(x: window.frame.midX, y: window.frame.maxY)
         mbkLog("PopoverController", "popoverWillShow -- anchor=\(anchorPoint!) hostingWindow=#\(window.windowNumber)")
     }
