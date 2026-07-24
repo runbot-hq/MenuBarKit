@@ -232,9 +232,14 @@ public final class MBKPopoverController: NSObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                mbkLog("PopoverController", "event monitor fired — hasActiveOverlay=\(self.overlayGate.hasActiveOverlay)")
-                if self.overlayGate.hasActiveOverlay {
-                    if self.hasSheetChildWindow {
+                let hasOverlay = self.overlayGate.hasActiveOverlay
+                let hasFilePicker = self.overlayGate.hasFilePickerOverlay
+                mbkLog("PopoverController", "event monitor fired — hasActiveOverlay=\(hasOverlay) hasFilePickerOverlay=\(hasFilePicker)")
+                if hasOverlay {
+                    if hasFilePicker {
+                        // Click is going to the floating file picker panel — never forceClose.
+                        mbkLog("PopoverController", "event monitor — file picker active, ignoring outside click")
+                    } else if self.hasSheetChildWindow {
                         mbkLog("PopoverController", "event monitor — sheet overlay, force-closing")
                         self.forceClose()
                     } else {
@@ -289,6 +294,7 @@ extension MBKPopoverController: NSPopoverDelegate {
         stopEventMonitor()
         anchorPoint = nil
         overlayGate.hasActiveOverlay = false
+        overlayGate.hasFilePickerOverlay = false
         mbkLog("PopoverController", "overlay gate reset on close")
         onDidClose?()
         mbkLog("PopoverController", "onDidClose fired")

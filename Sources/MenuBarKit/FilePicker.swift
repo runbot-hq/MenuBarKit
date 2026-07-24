@@ -7,7 +7,7 @@
 //   binding on that window — corrupting isSheetPresented state.
 //
 // WHY panel.level = popoverWindow.level + 1, NOT addChildWindow:
-//   addChildWindow creates a parent-child relationship:
+//   addChildWindow causes two problems:
 //   1. Clicking outside the app boundary dismisses the child panel.
 //   2. hasSheetChildWindow counts childWindows and triggers forceClose.
 //   .floating (level 3) is below the popover's nonactivatingPanel level.
@@ -15,14 +15,20 @@
 //   is always on top.
 //
 // WHY panel.orderOut AFTER COMPLETION:
-//   NSOpenPanel windows are not automatically released after panel.begin{}.
-//   Without explicit orderOut they accumulate in NSApp.windows.
+//   NSOpenPanel windows accumulate in NSApp.windows without explicit orderOut.
 //
 // WHY gateWasAlreadyArmed / CONCURRENT OVERLAY SAFETY:
 //   If called while a sheet is already open (gate=true), we must not clear
 //   the gate on completion — the sheet is still holding it. We snapshot
 //   the gate state before opening and only clear if we were the ones who
 //   armed it. Mirrors the pattern in MBKAlertModifier.
+//
+// WHY hasFilePickerOverlay:
+//   When a picker is open inside a sheet, the sheet child window is already
+//   attached to the popover. The event monitor sees hwChildren=1 and calls
+//   forceClose on every outside click — including clicks inside the picker.
+//   hasFilePickerOverlay lets the monitor know a picker is active and skip
+//   forceClose even when a sheet child is present.
 //
 // WHY DEFERRED GATE CLEAR:
 //   The global mouse-down monitor fires on the same click that dismisses
@@ -38,14 +44,13 @@ public func mbkOpenFilePicker(
     message: String? = nil,
     completion: @escaping @MainActor (URL?) -> Void
 ) {
-    mbkLog("FilePicker", "mbkOpenFilePicker called — overlayGate.hasActiveOverlay=\(overlayGate.hasActiveOverlay)")
+    mbkLog("FilePicker", "mbkOpenFilePicker called — overlayGate.hasActiveOverlay=\(overlayGate.hasActiveOverlay) hasFilePickerOverlay=\(overlayGate.hasFilePickerOverlay)")
     mbkLog("FilePicker", "window count=\(NSApp.windows.count)")
     for w in NSApp.windows {
         let title = w.title.isEmpty ? "<empty>" : w.title
         mbkLog("FilePicker", "  window #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) title=\(title)")
     }
 
-    // Snapshot before we touch the gate.
     let gateWasAlreadyArmed = overlayGate.hasActiveOverlay
     mbkLog("FilePicker", "gateWasAlreadyArmed=\(gateWasAlreadyArmed)")
 
@@ -65,18 +70,21 @@ public func mbkOpenFilePicker(
     mbkLog("FilePicker", "panel created — level=\(panel.level.rawValue)")
 
     overlayGate.hasActiveOverlay = true
-    mbkLog("FilePicker", "hasActiveOverlay=true — calling panel.begin")
+    overlayGate.hasFilePickerOverlay = true
+    mbkLog("FilePicker", "hasActiveOverlay=true hasFilePickerOverlay=true — calling panel.begin")
 
     panel.begin { response in
-        mbkLog("FilePicker", "panel.begin completion — response=\(response.rawValue) hasActiveOverlay=\(overlayGate.hasActiveOverlay) gateWasAlreadyArmed=\(gateWasAlreadyArmed)")
+        mbkLog("FilePicker", "panel.begin completion — response=\(response.rawValue) gateWasAlreadyArmed=\(gateWasAlreadyArmed)")
         panel.orderOut(nil)
         mbkLog("FilePicker", "panel.orderOut called — window count now=\(NSApp.windows.count)")
         DispatchQueue.main.async {
+            overlayGate.hasFilePickerOverlay = false
+            mbkLog("FilePicker", "hasFilePickerOverlay=false")
             if gateWasAlreadyArmed {
-                mbkLog("FilePicker", "deferred: gate was already armed by concurrent overlay — preserving hasActiveOverlay=true")
+                mbkLog("FilePicker", "gate was already armed by concurrent overlay — preserving hasActiveOverlay=true")
             } else {
-                mbkLog("FilePicker", "deferred gate clear — setting hasActiveOverlay=false")
                 overlayGate.hasActiveOverlay = false
+                mbkLog("FilePicker", "hasActiveOverlay=false")
             }
             let url = response == .OK ? panel.url : nil
             mbkLog("FilePicker", "calling completion url=\(String(describing: url))")
