@@ -8,16 +8,21 @@
 //     - The popover can be closed by an outside-click while the sheet is open.
 //
 // SOLUTION:
-//   After SwiftUI presents the sheet, poll NSApp.windows one runloop later
-//   via DispatchQueue.main.async to find the new sheet window and wire it
-//   as a child of the popover window via addChildWindow(_:ordered:).
+//   After SwiftUI presents the sheet, poll NSApp.windows two runloop turns
+//   later to find the new sheet window and wire it as a child of the popover
+//   window via addChildWindow(_:ordered:).
 //
-// WHY DispatchQueue.main.async (not NSWindow.didBecomeKeyNotification):
-//   On session restore, onChange(true) fires and the sheet window is created
-//   by SwiftUI in the same runloop turn. By the time a notification observer
-//   is registered, didBecomeKeyNotification has already fired and the window
-//   is missed. DispatchQueue.main.async polls one runloop later and catches
-//   the window regardless of registration timing.
+// WHY TWO HOPS (matching d7e8596):
+//   Hop 1 — Task { @MainActor } in onChange:
+//     Crosses the actor isolation boundary. Does NOT guarantee the NSWindow
+//     exists yet — SwiftUI has not rendered the sheet in this turn.
+//
+//   Hop 2 — DispatchQueue.main.async inside MBKSheetAnchorTask.start():
+//     Drains one more run-loop turn. By this point SwiftUI has created the
+//     sheet NSWindow and it appears in NSApp.windows.
+//
+//   Collapsing to one hop (DispatchQueue only, no Task) loses the second
+//   drain and the sheet window is not yet in NSApp.windows on restore.
 //
 // SHEET WINDOW DISCRIMINATORS:
 //   Two predicates identify the SwiftUI sheet window and reject NSOpenPanel:
@@ -37,17 +42,13 @@
 //   Set FALSE unconditionally in onChange(false) — always clears on dismiss.
 //
 // CANCELLATION:
-//   cancel() sets a flag. The DispatchQueue.main.async closure checks it
-//   before anchoring — if the sheet was dismissed before the poll fires,
-//   no child window is created and the gate stays false.
-//
-// WHY Item: Identifiable & Equatable (not just Identifiable):
-//   onChange(of:) requires Equatable so SwiftUI can diff old vs new values.
+//   cancel() sets a flag checked in both hops. If the sheet is dismissed
+//   before the poll fires, no child window is created and gate stays false.
 
 import AppKit
 import SwiftUI
 
-// MARK: - Module-level anchor helper
+// MARK: - Anchor task
 
 @MainActor
 func mbkWaitAndAnchorSheetWindow(
@@ -74,31 +75,45 @@ final class MBKSheetAnchorTask {
     }
 
     func start() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, !self.cancelled else { return }
-            let pw = self.popoverWindow
-            // Log all candidate windows so we can see what's being matched/rejected
-            let candidates = NSApp.windows.filter { $0 !== pw }
-            for w in candidates {
-                mbkLog("AnchoredSheet[\(self.label)]", "candidate windowNumber=\(w.windowNumber) styleMask=\(w.styleMask.rawValue) inSheets=\(pw.sheets.contains(w))")
-            }
-            guard let sheetWindow = candidates.first(where: {
-                $0.styleMask == .borderless &&
-                !pw.sheets.contains($0)
-            }) else {
-                mbkLog("AnchoredSheet[\(self.label)]", "poll — no matching window found")
+        mbkLog("AnchoredSheet[\(label)]", "start — hop1 Task queued")
+        // Hop 1: actor isolation crossing — does NOT guarantee sheet window exists yet.
+        Task { @MainActor [weak self] in
+            guard let self, !cancelled else {
+                mbkLog("AnchoredSheet[\(self?.label ?? label)]", "hop1 — cancelled, aborting")
                 return
             }
-            mbkLog("AnchoredSheet[\(self.label)]", "addChildWindow — windowNumber=\(sheetWindow.windowNumber)")
-            pw.addChildWindow(sheetWindow, ordered: .above)
-            self.overlayGate.hasActiveOverlay = true
-            mbkLog("AnchoredSheet[\(self.label)]", "hasActiveOverlay=true")
+            mbkLog("AnchoredSheet[\(label)]", "hop1 complete — queuing hop2 DispatchQueue")
+            // Hop 2: drain one more runloop turn — sheet NSWindow exists by now.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !cancelled else {
+                    mbkLog("AnchoredSheet[\(self?.label ?? label)]", "hop2 — cancelled, aborting")
+                    return
+                }
+                mbkLog("AnchoredSheet[\(label)]", "hop2 — polling NSApp.windows (count=\(NSApp.windows.count))")
+                let pw = popoverWindow
+                // Log all non-popover candidates for diagnosis
+                for w in NSApp.windows where w !== pw {
+                    mbkLog("AnchoredSheet[\(label)]", "  candidate #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) inSheets=\(pw.sheets.contains(w))")
+                }
+                guard let sheetWindow = NSApp.windows.first(where: {
+                    $0 !== pw &&
+                    $0.styleMask == .borderless &&
+                    !pw.sheets.contains($0)
+                }) else {
+                    mbkLog("AnchoredSheet[\(label)]", "hop2 — no matching window found")
+                    return
+                }
+                mbkLog("AnchoredSheet[\(label)]", "addChildWindow — windowNumber=\(sheetWindow.windowNumber)")
+                pw.addChildWindow(sheetWindow, ordered: .above)
+                overlayGate.hasActiveOverlay = true
+                mbkLog("AnchoredSheet[\(label)]", "hasActiveOverlay=true")
+            }
         }
     }
 
     func cancel() {
         cancelled = true
-        mbkLog("AnchoredSheet[\(label)]", "anchor cancelled")
+        mbkLog("AnchoredSheet[\(label)]", "cancel called")
     }
 }
 
@@ -133,14 +148,15 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
         content
             .sheet(isPresented: $isPresented, content: sheetContent)
             .onChange(of: isPresented) { _, newValue in
-                mbkLog("AnchoredSheet[isPresented]", "onChange — newValue=\(newValue)")
+                mbkLog("AnchoredSheet[isPresented]", "onChange newValue=\(newValue) — windows=\(NSApp.windows.count)")
                 if newValue {
                     guard let popoverWindow = NSApp.windows.first(where: {
                         $0.styleMask.contains(.nonactivatingPanel)
                     }) else {
-                        mbkLog("AnchoredSheet[isPresented]", "no nonactivatingPanel window — aborting")
+                        mbkLog("AnchoredSheet[isPresented]", "onChange — no nonactivatingPanel window, aborting")
                         return
                     }
+                    mbkLog("AnchoredSheet[isPresented]", "onChange — popoverWindow #\(popoverWindow.windowNumber), starting anchor task")
                     anchorTask = mbkWaitAndAnchorSheetWindow(
                         popoverWindow: popoverWindow,
                         overlayGate: overlayGate,
@@ -150,7 +166,7 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
                     anchorTask?.cancel()
                     anchorTask = nil
                     overlayGate.hasActiveOverlay = false
-                    mbkLog("AnchoredSheet[isPresented]", "hasActiveOverlay=false")
+                    mbkLog("AnchoredSheet[isPresented]", "onChange false — hasActiveOverlay=false")
                 }
             }
     }
@@ -169,14 +185,16 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
         content
             .sheet(item: $item, content: sheetContent)
             .onChange(of: item) { _, newValue in
-                mbkLog("AnchoredSheet[item]", "onChange — newValue=\(newValue != nil ? "some" : "nil")")
-                if newValue != nil {
+                let isPresented = newValue != nil
+                mbkLog("AnchoredSheet[item]", "onChange isPresented=\(isPresented) — windows=\(NSApp.windows.count)")
+                if isPresented {
                     guard let popoverWindow = NSApp.windows.first(where: {
                         $0.styleMask.contains(.nonactivatingPanel)
                     }) else {
-                        mbkLog("AnchoredSheet[item]", "no nonactivatingPanel window — aborting")
+                        mbkLog("AnchoredSheet[item]", "onChange — no nonactivatingPanel window, aborting")
                         return
                     }
+                    mbkLog("AnchoredSheet[item]", "onChange — popoverWindow #\(popoverWindow.windowNumber), starting anchor task")
                     anchorTask = mbkWaitAndAnchorSheetWindow(
                         popoverWindow: popoverWindow,
                         overlayGate: overlayGate,
@@ -186,7 +204,7 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
                     anchorTask?.cancel()
                     anchorTask = nil
                     overlayGate.hasActiveOverlay = false
-                    mbkLog("AnchoredSheet[item]", "hasActiveOverlay=false")
+                    mbkLog("AnchoredSheet[item]", "onChange false — hasActiveOverlay=false")
                 }
             }
     }
