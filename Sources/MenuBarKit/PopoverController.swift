@@ -23,7 +23,9 @@ public final class MBKPopoverController: NSObject, MBKPopoverControllerProtocol 
     private var popover: NSPopover!
     private var hostingController: NSHostingController<AnyView>!
     private var isSetUp = false
+    // Safe: registered and removed exclusively on the main thread via NSEvent monitor API.
     nonisolated(unsafe) private var eventMonitor: Any?
+    // Safe: registered and removed exclusively on the main thread via NSWorkspace.notificationCenter.
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
     private var anchorPoint: NSPoint?
     private var onWillCloseFired = false
