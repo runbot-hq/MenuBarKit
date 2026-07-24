@@ -12,38 +12,31 @@
 //   later to find the new sheet window and wire it as a child of the popover
 //   window via addChildWindow(_:ordered:).
 //
-// WHY TWO HOPS (matching d7e8596):
+// WHY TWO HOPS:
 //   Hop 1 — Task { @MainActor } in onChange:
-//     Crosses the actor isolation boundary. Does NOT guarantee the NSWindow
-//     exists yet — SwiftUI has not rendered the sheet in this turn.
-//
-//   Hop 2 — DispatchQueue.main.async inside MBKSheetAnchorTask.start():
-//     Drains one more run-loop turn. By this point SwiftUI has created the
-//     sheet NSWindow and it appears in NSApp.windows.
-//
-//   Collapsing to one hop (DispatchQueue only, no Task) loses the second
-//   drain and the sheet window is not yet in NSApp.windows on restore.
+//     Actor isolation crossing. Does NOT guarantee the NSWindow exists yet.
+//   Hop 2 — DispatchQueue.main.async:
+//     Drains one more run-loop turn. Sheet NSWindow exists by this point.
 //
 // SHEET WINDOW DISCRIMINATORS:
-//   Two predicates identify the SwiftUI sheet window and reject NSOpenPanel:
+//   styleMask == .borderless is NOT reliable — on some macOS versions SwiftUI
+//   sheet windows have styleMask=193 (titled). Removed.
 //
-//   1. window.styleMask == .borderless (exact equality, not .contains)
-//      SwiftUI sheet windows have exactly .borderless and no other bits.
-//      NSOpenPanel has .titled | .closable | .resizable even as a sheet modal.
-//
-//   2. !popoverWindow.sheets.contains(window)
-//      NSOpenPanel presented via beginSheetModal(for: popoverWindow) appears
-//      in popoverWindow.sheets. SwiftUI sheet windows added via addChildWindow
-//      never appear in .sheets. This is the definitive discriminator.
+//   Remaining discriminators:
+//   1. window !== popoverWindow
+//   2. !window.styleMask.contains(.nonactivatingPanel) — rejects popover itself
+//   3. !popoverWindow.sheets.contains(window) — rejects NSOpenPanel presented
+//      via beginSheetModal(for: popoverWindow), which appears in .sheets.
+//      SwiftUI sheet windows added via addChildWindow do NOT appear in .sheets.
+//      This is the definitive discriminator confirmed by logs (inSheets=true
+//      for picker, inSheets=false for SwiftUI sheet).
 //
 // GATE TIMING:
-//   hasActiveOverlay is set TRUE only after addChildWindow succeeds.
-//   Never set in onChange — avoids stuck gate if poll finds no window.
-//   Set FALSE unconditionally in onChange(false) — always clears on dismiss.
+//   hasActiveOverlay set TRUE only after addChildWindow succeeds.
+//   Set FALSE unconditionally in onChange(false).
 //
 // CANCELLATION:
-//   cancel() sets a flag checked in both hops. If the sheet is dismissed
-//   before the poll fires, no child window is created and gate stays false.
+//   cancel() flag checked in both hops.
 
 import AppKit
 import SwiftUI
@@ -76,35 +69,32 @@ final class MBKSheetAnchorTask {
 
     func start() {
         mbkLog("AnchoredSheet[\(label)]", "start — hop1 Task queued")
-        // Capture label for use in guard-else branches where self may be nil.
         let capturedLabel = label
-        // Hop 1: actor isolation crossing — does NOT guarantee sheet window exists yet.
         Task { @MainActor [weak self] in
             guard let self, !self.cancelled else {
-                mbkLog("AnchoredSheet[\(capturedLabel)]", "hop1 — cancelled or deallocated, aborting")
+                mbkLog("AnchoredSheet[\(capturedLabel)]", "hop1 — cancelled/deallocated")
                 return
             }
-            mbkLog("AnchoredSheet[\(self.label)]", "hop1 complete — queuing hop2 DispatchQueue")
-            // Hop 2: drain one more runloop turn — sheet NSWindow exists by now.
+            mbkLog("AnchoredSheet[\(self.label)]", "hop1 complete — queuing hop2")
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.cancelled else {
-                    mbkLog("AnchoredSheet[\(capturedLabel)]", "hop2 — cancelled or deallocated, aborting")
+                    mbkLog("AnchoredSheet[\(capturedLabel)]", "hop2 — cancelled/deallocated")
                     return
                 }
                 let pw = self.popoverWindow
-                mbkLog("AnchoredSheet[\(self.label)]", "hop2 — polling NSApp.windows (count=\(NSApp.windows.count))")
+                mbkLog("AnchoredSheet[\(self.label)]", "hop2 — polling \(NSApp.windows.count) windows")
                 for w in NSApp.windows where w !== pw {
-                    mbkLog("AnchoredSheet[\(self.label)]", "  candidate #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) inSheets=\(pw.sheets.contains(w))")
+                    mbkLog("AnchoredSheet[\(self.label)]", "  candidate #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) inSheets=\(pw.sheets.contains(w)) isPanel=\(w.styleMask.contains(.nonactivatingPanel))")
                 }
                 guard let sheetWindow = NSApp.windows.first(where: {
                     $0 !== pw &&
-                    $0.styleMask == .borderless &&
+                    !$0.styleMask.contains(.nonactivatingPanel) &&
                     !pw.sheets.contains($0)
                 }) else {
                     mbkLog("AnchoredSheet[\(self.label)]", "hop2 — no matching window found")
                     return
                 }
-                mbkLog("AnchoredSheet[\(self.label)]", "addChildWindow — windowNumber=\(sheetWindow.windowNumber)")
+                mbkLog("AnchoredSheet[\(self.label)]", "addChildWindow — #\(sheetWindow.windowNumber) styleMask=\(sheetWindow.styleMask.rawValue)")
                 pw.addChildWindow(sheetWindow, ordered: .above)
                 self.overlayGate.hasActiveOverlay = true
                 mbkLog("AnchoredSheet[\(self.label)]", "hasActiveOverlay=true")
