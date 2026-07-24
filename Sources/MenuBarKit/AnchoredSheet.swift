@@ -13,10 +13,9 @@
 //   as a child of the popover window via addChildWindow(_:ordered:).
 //
 // GATE TIMING:
-//   hasActiveOverlay is set TRUE optimistically in onChange(true) — before the
-//   sheet window exists. This ensures popoverShouldClose is blocked the moment
-//   isSheetPresented flips true, including during session restore where SwiftUI
-//   fires onChange before creating the window.
+//   hasActiveOverlay is set TRUE optimistically in onChange(true), but only
+//   AFTER confirming the popover window exists. If no nonactivatingPanel window
+//   is found, onChange returns early without touching the gate — no stuck gate.
 //
 //   cancel() explicitly clears the gate so a task cancelled before addChildWindow
 //   never leaves hasActiveOverlay stuck true.
@@ -74,8 +73,7 @@ import SwiftUI
 
 /// Observes NSWindow.didBecomeKeyNotification and wires the first matching
 /// SwiftUI sheet window as a child of `popoverWindow` via addChildWindow.
-/// The overlay gate is armed BEFORE this task starts (optimistically in onChange)
-/// and is cleared by cancel() if the task is aborted before the window appears.
+/// The overlay gate is armed after confirming the popover window exists.
 /// Returns a cancellable token — call `cancel()` if the sheet is dismissed
 /// before its window appeared.
 @MainActor
@@ -126,8 +124,7 @@ final class MBKSheetAnchorTask {
                 self.removeObserver()
                 mbkLog("AnchoredSheet[\(self.label)]", "addChildWindow — windowNumber=\(window.windowNumber)")
                 self.popoverWindow.addChildWindow(window, ordered: .above)
-                // Gate was already armed in onChange(true) before this task started.
-                mbkLog("AnchoredSheet[\(self.label)]", "hasActiveOverlay=true (already armed)")
+                mbkLog("AnchoredSheet[\(self.label)]", "hasActiveOverlay=true (armed at onChange, window now anchored)")
             }
         }
     }
@@ -195,16 +192,18 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
         content
             .sheet(isPresented: $isPresented, content: sheetContent)
             .onChange(of: isPresented) { _, newValue in
+                mbkLog("AnchoredSheet[isPresented]", "onChange — newValue=\(newValue)")
                 if newValue {
-                    // Arm gate immediately — blocks popoverShouldClose before
-                    // the sheet window exists. cancel() will clear it if needed.
-                    overlayGate.hasActiveOverlay = true
                     guard let popoverWindow = NSApp.windows.first(where: {
                         $0.styleMask.contains(.nonactivatingPanel)
                     }) else {
-                        mbkLog("AnchoredSheet", "no nonactivatingPanel window — sheet will not be anchored")
+                        mbkLog("AnchoredSheet[isPresented]", "no nonactivatingPanel window — aborting, gate unchanged")
                         return
                     }
+                    // Arm gate only after confirming popover window exists.
+                    // If guard above fails we return without touching the gate.
+                    overlayGate.hasActiveOverlay = true
+                    mbkLog("AnchoredSheet[isPresented]", "gate armed — starting anchor task")
                     anchorTask = mbkWaitAndAnchorSheetWindow(
                         popoverWindow: popoverWindow,
                         overlayGate: overlayGate,
@@ -214,6 +213,7 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
                     anchorTask?.cancel()
                     anchorTask = nil
                     overlayGate.hasActiveOverlay = false
+                    mbkLog("AnchoredSheet[isPresented]", "gate cleared")
                 }
             }
     }
@@ -232,16 +232,17 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
         content
             .sheet(item: $item, content: sheetContent)
             .onChange(of: item) { _, newValue in
+                mbkLog("AnchoredSheet[item]", "onChange — newValue=\(newValue != nil ? "some" : "nil")")
                 if newValue != nil {
-                    // Arm gate immediately — blocks popoverShouldClose before
-                    // the sheet window exists. cancel() will clear it if needed.
-                    overlayGate.hasActiveOverlay = true
                     guard let popoverWindow = NSApp.windows.first(where: {
                         $0.styleMask.contains(.nonactivatingPanel)
                     }) else {
-                        mbkLog("AnchoredSheet[item]", "no nonactivatingPanel window — sheet will not be anchored")
+                        mbkLog("AnchoredSheet[item]", "no nonactivatingPanel window — aborting, gate unchanged")
                         return
                     }
+                    // Arm gate only after confirming popover window exists.
+                    overlayGate.hasActiveOverlay = true
+                    mbkLog("AnchoredSheet[item]", "gate armed — starting anchor task")
                     anchorTask = mbkWaitAndAnchorSheetWindow(
                         popoverWindow: popoverWindow,
                         overlayGate: overlayGate,
@@ -251,6 +252,7 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
                     anchorTask?.cancel()
                     anchorTask = nil
                     overlayGate.hasActiveOverlay = false
+                    mbkLog("AnchoredSheet[item]", "gate cleared")
                 }
             }
     }
