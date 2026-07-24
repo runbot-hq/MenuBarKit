@@ -10,21 +10,21 @@ import Foundation
 ///
 /// Example:
 /// ```swift
-/// MBKLogHandler = { subsystem, message in
+/// mbkLogHandler = { subsystem, message in
 ///     logger.debug("[MBK:\(subsystem)] \(message)")
 /// }
 /// ```
 @MainActor
-public var MBKLogHandler: (_ subsystem: String, _ message: String) -> Void = { subsystem, message in
+public var mbkLogHandler: (_ subsystem: String, _ message: String) -> Void = { subsystem, message in
     print("[MBK:\(subsystem)] \(message)")
 }
 
-/// Internal logging entry point. Routes through `MBKLogHandler`.
+/// Internal logging entry point. Routes through `mbkLogHandler`.
 /// Compiled out entirely in release builds.
 @MainActor
 @inlinable
 func mbkLog(_ subsystem: String, _ message: String) {
 #if DEBUG
-    MBKLogHandler(subsystem, message)
+    mbkLogHandler(subsystem, message)
 #endif
 }

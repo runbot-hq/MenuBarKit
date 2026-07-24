@@ -30,11 +30,19 @@
 //   hasFilePickerOverlay lets the monitor know a picker is active and skip
 //   forceClose even when a sheet child is present.
 //
-// WHY DEFERRED GATE CLEAR:
-//   The global mouse-down monitor fires on the same click that dismisses
-//   the panel. Clearing hasActiveOverlay synchronously lets the monitor
-//   see false on that event and call performClose. One
-//   DispatchQueue.main.async hop defers the clear past that delivery.
+// WHY Task { @MainActor } WRAPPING panel.begin COMPLETION:
+//   NSOpenPanel.begin delivers its completion on the main thread (documented)
+//   but the closure is not @MainActor-isolated by the type system. Wrapping in
+//   Task { @MainActor } provides compiler-enforced actor isolation for all
+//   state mutations that follow, including panel.orderOut and gate clears.
+//
+// WHY DEFERRED GATE CLEAR (DispatchQueue.main.async INSIDE Task { @MainActor }):
+//   The global mouse-down monitor fires on the same runloop turn that dismisses
+//   the panel. Clearing hasActiveOverlay synchronously — or even at the next
+//   actor turn — lets the monitor see false on that delivery and call
+//   performClose. One DispatchQueue.main.async hop defers the clear past the
+//   monitor's event delivery. The two hops serve different purposes: the Task
+//   hop enforces actor isolation; the GCD hop defers past AppKit event delivery.
 
 import AppKit
 

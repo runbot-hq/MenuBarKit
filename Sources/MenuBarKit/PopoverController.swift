@@ -113,14 +113,11 @@ public final class MBKPopoverController: NSObject, MBKPopoverControllerProtocol 
     }
 
     private var hasSheetChildWindow: Bool {
-        let hw = hostingWindow
         let pw = panelWindow
-        let hwChildren = hw?.childWindows ?? []
         let pwChildren = pw?.childWindows ?? []
-        let same = hw === pw
         let result = !pwChildren.isEmpty
         mbkLog("PopoverController",
-               "hasSheetChildWindow -- hw=#\(hw.map { "\($0.windowNumber)" } ?? "nil") pw=#\(pw.map { "\($0.windowNumber)" } ?? "nil") same=\(same) hwChildren=\(hwChildren.count) pwChildren=\(pwChildren.count) -> \(result)")
+               "hasSheetChildWindow -- pw=#\(pw.map { "\($0.windowNumber)" } ?? "nil") pwChildren=\(pwChildren.count) -> \(result)")
         return result
     }
 
@@ -136,6 +133,12 @@ public final class MBKPopoverController: NSObject, MBKPopoverControllerProtocol 
     }
 
     private func forceClose() {
+        // Intentional ordering: onWillClose fires first so the host can snapshot
+        // state (e.g. isSheetPresented = false) while the view tree is still live.
+        // child.close() then tears down the window at the AppKit level. SwiftUI
+        // does not need to tear down first — MBK owns the teardown explicitly.
+        // This is safe because child.close() sends windowWillClose/windowDidClose
+        // which releases the window from NSApp.windows and destroys its view tree.
         fireOnWillClose(wasForced: true)
         mbkLog("PopoverController", "forceClose -- clearing gate")
         overlayGate.hasActiveOverlay = false
