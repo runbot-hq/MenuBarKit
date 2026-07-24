@@ -1,50 +1,27 @@
 // FilePicker.swift
 // MenuBarKit
-//
-// Presents NSOpenPanel anchored to the popover window via beginSheetModal,
-// and manages overlayGate.hasActiveOverlay for the duration of the panel's lifetime.
-//
-// GATE:
-//   MBKOverlayGate is passed explicitly here because mbkOpenFilePicker is a
-//   free function, not a ViewModifier — it has no access to the SwiftUI
-//   environment. The caller must pass the gate obtained from @Environment.
-//
-// WHY beginSheetModal INSTEAD OF runModal:
-//   NSOpenPanel.runModal() blocks the main thread and ignores the popover.
-//   beginSheetModal attaches the panel as a sheet to a specific window,
-//   keeping it visually anchored.
-//
-// WHY hasActiveOverlay IS SET BEFORE beginSheetModal:
-//   popoverShouldClose can fire between deciding to open the panel and
-//   beginSheetModal returning. Setting the gate first ensures no race.
-//
-// beginSheetModal COMPLETION — WHY Task { @MainActor }:
-//   NSOpenPanel.beginSheetModal delivers its completion on the main thread,
-//   but this guarantee is informal. Task { @MainActor } makes the actor hop
-//   explicit and compiler-enforced — the correct Swift 6 pattern.
 
 import AppKit
 
-/// Opens a directory picker anchored to the popover window.
-/// The completion closure is called on the main actor with the selected URL,
-/// or nil if the user cancelled.
-///
-/// - Parameters:
-///   - overlayGate: The shared overlay gate — obtain from `@Environment(MBKOverlayGate.self)`.
-///   - message: Optional descriptive message shown in the panel header.
-///   - completion: Called on the main actor with the selected `URL`, or `nil` if cancelled.
 @MainActor
 public func mbkOpenFilePicker(
     overlayGate: MBKOverlayGate,
     message: String? = nil,
     completion: @escaping @MainActor (URL?) -> Void
 ) {
+    mbkLog("FilePicker", "mbkOpenFilePicker called — overlayGate.hasActiveOverlay=\(overlayGate.hasActiveOverlay)")
+    mbkLog("FilePicker", "window count=\(NSApp.windows.count)")
+    for w in NSApp.windows {
+        mbkLog("FilePicker", "  window #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) title=\(w.title.isEmpty ? \"<empty>\" : w.title)")
+    }
+
     guard let window = NSApp.windows.first(where: {
         $0.styleMask.contains(.nonactivatingPanel)
     }) else {
         mbkLog("FilePicker", "no popover window found, aborting")
         return
     }
+    mbkLog("FilePicker", "popover window=#\(window.windowNumber)")
 
     let panel = NSOpenPanel()
     panel.canChooseFiles = false
@@ -52,15 +29,20 @@ public func mbkOpenFilePicker(
     panel.allowsMultipleSelection = false
     panel.prompt = "Select"
     if let message { panel.message = message }
+    mbkLog("FilePicker", "panel created — setting hasActiveOverlay=true")
 
     overlayGate.hasActiveOverlay = true
-    mbkLog("FilePicker", "hasActiveOverlay=true")
+    mbkLog("FilePicker", "hasActiveOverlay=true — calling beginSheetModal")
 
     panel.beginSheetModal(for: window) { response in
+        mbkLog("FilePicker", "beginSheetModal completion — response=\(response.rawValue) hasActiveOverlay=\(overlayGate.hasActiveOverlay)")
         Task { @MainActor in
+            mbkLog("FilePicker", "completion Task hop — setting hasActiveOverlay=false")
             overlayGate.hasActiveOverlay = false
-            mbkLog("FilePicker", "hasActiveOverlay=false")
+            mbkLog("FilePicker", "hasActiveOverlay=false — calling completion url=\(String(describing: response == .OK ? panel.url : nil))")
             completion(response == .OK ? panel.url : nil)
+            mbkLog("FilePicker", "completion done")
         }
     }
+    mbkLog("FilePicker", "beginSheetModal returned (panel is now showing)")
 }

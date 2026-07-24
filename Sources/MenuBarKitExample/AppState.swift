@@ -13,13 +13,17 @@ enum Route: Equatable {
 @MainActor
 final class AppState {
     var route: Route = .main {
-        didSet { print("[AppState] route: \(oldValue) → \(self.route)") }
+        didSet { print("[AppState] route: \(oldValue) → \(self.route) | Thread=\(Thread.isMainThread ? \"main\" : \"bg\")") }
     }
     var isSheetPresented: Bool = false {
-        didSet { print("[AppState] isSheetPresented: \(oldValue) → \(self.isSheetPresented)") }
+        didSet { print("[AppState] isSheetPresented: \(oldValue) → \(self.isSheetPresented) | Thread=\(Thread.isMainThread ? \"main\" : \"bg\")") }
     }
-    var pickedURL: URL?
-    var sheetPickedURL: URL?
+    var pickedURL: URL? {
+        didSet { print("[AppState] pickedURL: \(String(describing: self.pickedURL))") }
+    }
+    var sheetPickedURL: URL? {
+        didSet { print("[AppState] sheetPickedURL: \(String(describing: self.sheetPickedURL))") }
+    }
     var showAlert: Bool = false {
         didSet { print("[AppState] showAlert: \(oldValue) → \(self.showAlert)") }
     }
@@ -33,11 +37,15 @@ final class AppState {
     }
 
     func saveSnapshot() -> SessionSnapshot {
-        SessionSnapshot(route: route, isSheetPresented: isSheetPresented)
+        let snap = SessionSnapshot(route: route, isSheetPresented: isSheetPresented)
+        print("[AppState] saveSnapshot — route=\(snap.route) sheet=\(snap.isSheetPresented)")
+        return snap
     }
 
     func restoreSnapshot(_ snapshot: SessionSnapshot) {
+        print("[AppState] restoreSnapshot — route=\(snapshot.route) sheet=\(snapshot.isSheetPresented)")
         route = snapshot.route
         isSheetPresented = snapshot.isSheetPresented
+        print("[AppState] restoreSnapshot done")
     }
 }

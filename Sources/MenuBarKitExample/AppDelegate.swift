@@ -1,18 +1,5 @@
 // AppDelegate.swift
 // MenuBarKitExample
-//
-// SESSION RESPAWN — hook split:
-//   onWillShow       → restore route only. No isSheetPresented touch —
-//                       SwiftUI resets it to false when the popover closes,
-//                       so onDidShow gets a genuine false→true transition.
-//   onDidShow        → restore isSheetPresented from snapshot via Task hop.
-//                       Popover window exists at this point.
-//   onDidClose       → saveSnapshot() from live AppState — captures
-//                       isSheetPresented correctly (SwiftUI has reset it
-//                       to false by the time this fires on normal close;
-//                       on force-close onWillForceClose already saved it).
-//   onWillForceClose → saveSnapshot() BEFORE gate cleared and BEFORE
-//                       isSheetPresented resets — captures sheet=true.
 
 import AppKit
 import MenuBarKit
@@ -21,6 +8,7 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        print("[AppDelegate] applicationDidFinishLaunching")
         popoverController = MBKPopoverController(
             rootView: RootView()
                 .environment(appState)
@@ -31,34 +19,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             maxWidth: 480,
             maxHeight: 600
         )
+        print("[AppDelegate] popoverController created")
         popoverController.setup()
 
-        // Restore route only — do NOT touch isSheetPresented here.
-        // SwiftUI resets isSheetPresented=false when the popover view
-        // disappears on close, so onDidShow will get a genuine false→true.
         popoverController.onWillShow = { [weak self] in
-            guard let self, let snap = lastSession else { return }
+            guard let self else { print("[AppDelegate] onWillShow — self nil"); return }
+            print("[AppDelegate] onWillShow — lastSession=\(String(describing: self.lastSession.map { "route=\($0.route) sheet=\($0.isSheetPresented)" }))")
+            guard let snap = lastSession else {
+                print("[AppDelegate] onWillShow — no session, skipping")
+                return
+            }
+            print("[AppDelegate] onWillShow — restoring route=\(snap.route)")
             appState.route = snap.route
-            print("[AppDelegate] route restored: \(snap.route)")
+            print("[AppDelegate] onWillShow — route restored")
         }
 
         popoverController.onDidShow = { [weak self] in
-            guard let self, let snap = lastSession else { return }
-            appState.isSheetPresented = snap.isSheetPresented
-            print("[AppDelegate] isSheetPresented restored: \(snap.isSheetPresented)")
+            guard let self else { print("[AppDelegate] onDidShow — self nil"); return }
+            print("[AppDelegate] onDidShow — lastSession=\(String(describing: self.lastSession.map { "route=\($0.route) sheet=\($0.isSheetPresented)" }))")
+            guard let snap = lastSession else {
+                print("[AppDelegate] onDidShow — no session, skipping")
+                return
+            }
+            let sheetValue = snap.isSheetPresented
+            print("[AppDelegate] onDidShow — will restore isSheetPresented=\(sheetValue)")
+            // Clear BEFORE restoring so a second onDidShow (e.g. picker respawn)
+            // does not re-fire sheet=true on a session that already ran.
+            lastSession = AppState.SessionSnapshot(route: snap.route, isSheetPresented: false)
+            print("[AppDelegate] onDidShow — lastSession.isSheetPresented cleared to false")
+            appState.isSheetPresented = sheetValue
+            print("[AppDelegate] onDidShow — isSheetPresented restored: \(sheetValue)")
         }
 
         popoverController.onDidClose = { [weak self] in
-            guard let self else { return }
-            lastSession = appState.saveSnapshot()
-            print("[AppDelegate] session saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
+            guard let self else { print("[AppDelegate] onDidClose — self nil"); return }
+            let snap = appState.saveSnapshot()
+            print("[AppDelegate] onDidClose — saving route=\(snap.route) sheet=\(snap.isSheetPresented)")
+            lastSession = snap
+            print("[AppDelegate] session saved: route=\(snap.route) sheet=\(snap.isSheetPresented)")
         }
 
         popoverController.onWillForceClose = { [weak self] in
-            guard let self else { return }
-            lastSession = appState.saveSnapshot()
-            print("[AppDelegate] session force-saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
+            guard let self else { print("[AppDelegate] onWillForceClose — self nil"); return }
+            let snap = appState.saveSnapshot()
+            print("[AppDelegate] onWillForceClose — saving route=\(snap.route) sheet=\(snap.isSheetPresented)")
+            lastSession = snap
+            print("[AppDelegate] session force-saved: route=\(snap.route) sheet=\(snap.isSheetPresented)")
         }
+
+        print("[AppDelegate] setup complete")
     }
 
     private let appState = AppState()

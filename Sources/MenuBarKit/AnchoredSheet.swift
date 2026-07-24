@@ -1,19 +1,5 @@
 // AnchoredSheet.swift
 // MenuBarKit
-//
-// GATE TIMING:
-//   overlayGate.hasActiveOverlay is set TRUE synchronously in onChange before
-//   any async hops. This ensures the event monitor sees the gate immediately
-//   even if the poll hasn't fired yet. Set FALSE synchronously on dismiss.
-//
-// WHY TWO HOPS:
-//   Hop 1 — Task { @MainActor }: actor crossing. Sheet NSWindow may not exist.
-//   Hop 2 — DispatchQueue.main.async: one more runloop drain. Window exists.
-//
-// SHEET WINDOW DISCRIMINATOR:
-//   .borderless && isKeyWindow — SwiftUI makes the sheet window key immediately
-//   on creation. NSOpenPanel is not borderless. Zombie sentinel windows are not
-//   key. This pair is the reliable discriminator from d7e8596.
 
 import AppKit
 import SwiftUI
@@ -26,6 +12,7 @@ func mbkWaitAndAnchorSheetWindow(
     overlayGate: MBKOverlayGate,
     label: String
 ) -> MBKSheetAnchorTask {
+    mbkLog("AnchoredSheet[\(label)]", "mbkWaitAndAnchorSheetWindow called — pw=#\(popoverWindow.windowNumber)")
     let task = MBKSheetAnchorTask(popoverWindow: popoverWindow, overlayGate: overlayGate, label: label)
     task.start()
     return task
@@ -39,6 +26,7 @@ final class MBKSheetAnchorTask {
     private var cancelled = false
 
     init(popoverWindow: NSWindow, overlayGate: MBKOverlayGate, label: String) {
+        mbkLog("AnchoredSheet[\(label)]", "MBKSheetAnchorTask.init pw=#\(popoverWindow.windowNumber)")
         self.popoverWindow = popoverWindow
         self.overlayGate = overlayGate
         self.label = label
@@ -59,19 +47,21 @@ final class MBKSheetAnchorTask {
                     return
                 }
                 let pw = self.popoverWindow
-                mbkLog("AnchoredSheet[\(self.label)]", "hop2 — polling \(NSApp.windows.count) windows")
-                for w in NSApp.windows where w !== pw {
+                let allWindows = NSApp.windows
+                mbkLog("AnchoredSheet[\(self.label)]", "hop2 — polling \(allWindows.count) windows")
+                for w in allWindows where w !== pw {
                     mbkLog("AnchoredSheet[\(self.label)]",
                            "  candidate #\(w.windowNumber) styleMask=\(w.styleMask.rawValue)"
                            + " isKey=\(w.isKeyWindow) borderless=\(w.styleMask == .borderless)"
-                           + " inSheets=\(pw.sheets.contains(w))")
+                           + " inSheets=\(pw.sheets.contains(w))"
+                           + " title=\(w.title.isEmpty ? \"<empty>\" : w.title)")
                 }
-                guard let sheetWindow = NSApp.windows.first(where: {
+                guard let sheetWindow = allWindows.first(where: {
                     $0 !== pw &&
                     $0.styleMask.contains(.borderless) &&
                     $0.isKeyWindow
                 }) else {
-                    mbkLog("AnchoredSheet[\(self.label)]", "hop2 — no matching window found")
+                    mbkLog("AnchoredSheet[\(self.label)]", "hop2 — no matching window found (borderless+isKey)")
                     return
                 }
                 mbkLog("AnchoredSheet[\(self.label)]", "addChildWindow — #\(sheetWindow.windowNumber)")
@@ -82,8 +72,13 @@ final class MBKSheetAnchorTask {
     }
 
     func cancel() {
+        mbkLog("AnchoredSheet[\(label)]", "cancel called — cancelled was \(cancelled)")
         cancelled = true
-        mbkLog("AnchoredSheet[\(label)]", "cancel called")
+    }
+
+    deinit {
+        // deinit is nonisolated so can't call mbkLog directly
+        print("[MBK:AnchoredSheet[\(label)]] deinit")
     }
 }
 
@@ -118,10 +113,8 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
     public func body(content: Content) -> some View {
         content
             .sheet(isPresented: $isPresented, content: sheetContent)
-            .onChange(of: isPresented) { _, newValue in
-                mbkLog("AnchoredSheet[isPresented]", "onChange newValue=\(newValue) windows=\(NSApp.windows.count)")
-                // Arm gate synchronously before hops so event monitor
-                // sees it immediately regardless of poll result.
+            .onChange(of: isPresented) { oldValue, newValue in
+                mbkLog("AnchoredSheet[isPresented]", "onChange \(oldValue)→\(newValue) windows=\(NSApp.windows.count) currentGate=\(overlayGate.hasActiveOverlay)")
                 overlayGate.hasActiveOverlay = newValue
                 if newValue {
                     guard let popoverWindow = NSApp.windows.first(where: {
@@ -137,9 +130,10 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
                         label: "isPresented"
                     )
                 } else {
+                    mbkLog("AnchoredSheet[isPresented]", "onChange false — cancelling anchorTask=\(anchorTask != nil)")
                     anchorTask?.cancel()
                     anchorTask = nil
-                    mbkLog("AnchoredSheet[isPresented]", "onChange false — gate=false")
+                    mbkLog("AnchoredSheet[isPresented]", "onChange false — gate=false done")
                 }
             }
     }
@@ -156,9 +150,9 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
     public func body(content: Content) -> some View {
         content
             .sheet(item: $item, content: sheetContent)
-            .onChange(of: item) { _, newValue in
+            .onChange(of: item) { oldValue, newValue in
                 let isPresented = newValue != nil
-                mbkLog("AnchoredSheet[item]", "onChange isPresented=\(isPresented) windows=\(NSApp.windows.count)")
+                mbkLog("AnchoredSheet[item]", "onChange isPresented=\(isPresented) windows=\(NSApp.windows.count) currentGate=\(overlayGate.hasActiveOverlay)")
                 overlayGate.hasActiveOverlay = isPresented
                 if isPresented {
                     guard let popoverWindow = NSApp.windows.first(where: {
@@ -174,9 +168,10 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
                         label: "item"
                     )
                 } else {
+                    mbkLog("AnchoredSheet[item]", "onChange false — cancelling anchorTask=\(anchorTask != nil)")
                     anchorTask?.cancel()
                     anchorTask = nil
-                    mbkLog("AnchoredSheet[item]", "onChange false — gate=false")
+                    mbkLog("AnchoredSheet[item]", "onChange false — gate=false done")
                 }
             }
     }
