@@ -75,7 +75,7 @@ final class MBKSheetAnchorTask {
     }
 
     deinit {
-        print("[MBK:AnchoredSheet[\(label)]] deinit")
+        mbkLog("AnchoredSheet[\(label)]", "deinit")
     }
 }
 

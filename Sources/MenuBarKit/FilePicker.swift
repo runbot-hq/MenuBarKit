@@ -74,22 +74,24 @@ public func mbkOpenFilePicker(
     mbkLog("FilePicker", "hasActiveOverlay=true hasFilePickerOverlay=true — calling panel.begin")
 
     panel.begin { response in
-        mbkLog("FilePicker", "panel.begin completion — response=\(response.rawValue) gateWasAlreadyArmed=\(gateWasAlreadyArmed)")
-        panel.orderOut(nil)
-        mbkLog("FilePicker", "panel.orderOut called — window count now=\(NSApp.windows.count)")
-        DispatchQueue.main.async {
-            overlayGate.hasFilePickerOverlay = false
-            mbkLog("FilePicker", "hasFilePickerOverlay=false")
-            if gateWasAlreadyArmed {
-                mbkLog("FilePicker", "gate was already armed by concurrent overlay — preserving hasActiveOverlay=true")
-            } else {
-                overlayGate.hasActiveOverlay = false
-                mbkLog("FilePicker", "hasActiveOverlay=false")
+        Task { @MainActor in
+            mbkLog("FilePicker", "panel.begin completion — response=\(response.rawValue) gateWasAlreadyArmed=\(gateWasAlreadyArmed)")
+            panel.orderOut(nil)
+            mbkLog("FilePicker", "panel.orderOut called — window count now=\(NSApp.windows.count)")
+            DispatchQueue.main.async {
+                overlayGate.hasFilePickerOverlay = false
+                mbkLog("FilePicker", "hasFilePickerOverlay=false")
+                if gateWasAlreadyArmed {
+                    mbkLog("FilePicker", "gate was already armed by concurrent overlay — preserving hasActiveOverlay=true")
+                } else {
+                    overlayGate.hasActiveOverlay = false
+                    mbkLog("FilePicker", "hasActiveOverlay=false")
+                }
+                let url = response == .OK ? panel.url : nil
+                mbkLog("FilePicker", "calling completion url=\(String(describing: url))")
+                completion(url)
+                mbkLog("FilePicker", "completion done")
             }
-            let url = response == .OK ? panel.url : nil
-            mbkLog("FilePicker", "calling completion url=\(String(describing: url))")
-            completion(url)
-            mbkLog("FilePicker", "completion done")
         }
     }
 
