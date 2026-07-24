@@ -1,5 +1,13 @@
 // FilePicker.swift
 // MenuBarKit
+//
+// WHY panel.begin{} INSTEAD OF beginSheetModal:
+//   beginSheetModal(for: popoverWindow) attaches NSOpenPanel as an AppKit
+//   sheet to the popover hosting window. SwiftUI sees a new sheet appear on
+//   that window and writes true back into any live .sheet(isPresented:)
+//   binding on the same window — corrupting isSheetPresented state.
+//   panel.begin{} presents the panel as a floating window with no sheet
+//   relationship to any window, so SwiftUI never fires that writeback.
 
 import AppKit
 
@@ -16,14 +24,6 @@ public func mbkOpenFilePicker(
         mbkLog("FilePicker", "  window #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) title=\(title)")
     }
 
-    guard let window = NSApp.windows.first(where: {
-        $0.styleMask.contains(.nonactivatingPanel)
-    }) else {
-        mbkLog("FilePicker", "no popover window found, aborting")
-        return
-    }
-    mbkLog("FilePicker", "popover window=#\(window.windowNumber)")
-
     let panel = NSOpenPanel()
     panel.canChooseFiles = false
     panel.canChooseDirectories = true
@@ -33,10 +33,10 @@ public func mbkOpenFilePicker(
     mbkLog("FilePicker", "panel created — setting hasActiveOverlay=true")
 
     overlayGate.hasActiveOverlay = true
-    mbkLog("FilePicker", "hasActiveOverlay=true — calling beginSheetModal")
+    mbkLog("FilePicker", "hasActiveOverlay=true — calling panel.begin (floating, no sheet attachment)")
 
-    panel.beginSheetModal(for: window) { response in
-        mbkLog("FilePicker", "beginSheetModal completion — response=\(response.rawValue) hasActiveOverlay=\(overlayGate.hasActiveOverlay)")
+    panel.begin { response in
+        mbkLog("FilePicker", "panel.begin completion — response=\(response.rawValue) hasActiveOverlay=\(overlayGate.hasActiveOverlay)")
         Task { @MainActor in
             mbkLog("FilePicker", "completion Task hop — setting hasActiveOverlay=false")
             overlayGate.hasActiveOverlay = false
@@ -46,5 +46,5 @@ public func mbkOpenFilePicker(
             mbkLog("FilePicker", "completion done")
         }
     }
-    mbkLog("FilePicker", "beginSheetModal returned (panel is now showing)")
+    mbkLog("FilePicker", "panel.begin returned (panel is now showing)")
 }
