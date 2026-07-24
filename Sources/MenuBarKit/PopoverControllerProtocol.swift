@@ -13,7 +13,7 @@
 import Foundation
 
 /// Protocol surface for `MBKPopoverController`.
-/// Exposes setup and the four session-restore hooks — everything a host app
+/// Exposes setup and the three session-restore hooks — everything a host app
 /// needs to integrate MenuBarKit without referencing the concrete class.
 @MainActor
 public protocol MBKPopoverControllerProtocol: AnyObject {
@@ -33,12 +33,10 @@ public protocol MBKPopoverControllerProtocol: AnyObject {
     /// gate or tries to anchor a sheet window.
     var onDidShow: (() -> Void)? { get set }
 
-    /// Called at the end of `popoverDidClose` after all cleanup.
-    /// Only fires on normal close (no overlay active).
-    var onDidClose: (() -> Void)? { get set }
-
-    /// Called inside `forceClose()` BEFORE the overlay gate is cleared and
-    /// BEFORE the popover closes. Use to snapshot session state when a sheet
-    /// overlay is active at outside-click time.
-    var onWillForceClose: (() -> Void)? { get set }
+    /// Called before any teardown whenever the popover closes — both on normal
+    /// close (user dismissed) and force-close (outside click with sheet active).
+    /// Host state is still intact when this fires, making it safe to snapshot.
+    /// Replaces the former `onDidClose` + `onWillForceClose` pair, which fired
+    /// at different points in teardown and required a coordination flag in the host.
+    var onWillClose: (() -> Void)? { get set }
 }

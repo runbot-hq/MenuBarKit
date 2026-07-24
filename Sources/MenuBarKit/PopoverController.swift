@@ -17,8 +17,7 @@ public final class MBKPopoverController: NSObject {
 
     public var onWillShow: (() -> Void)?
     public var onDidShow: (() -> Void)?
-    public var onDidClose: (() -> Void)?
-    public var onWillForceClose: (() -> Void)?
+    public var onWillClose: (() -> Void)?
 
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
@@ -120,8 +119,8 @@ public final class MBKPopoverController: NSObject {
     }
 
     private func forceClose() {
-        mbkLog("PopoverController", "forceClose -- calling onWillForceClose")
-        onWillForceClose?()
+        mbkLog("PopoverController", "forceClose -- calling onWillClose")
+        onWillClose?()
         mbkLog("PopoverController", "forceClose -- clearing gate")
         overlayGate.hasActiveOverlay = false
         if let pw = panelWindow {
@@ -290,14 +289,14 @@ extension MBKPopoverController: NSPopoverDelegate {
     }
 
     public func popoverDidClose(_ notification: Notification) {
-        mbkLog("PopoverController", "popoverDidClose")
+        mbkLog("PopoverController", "popoverDidClose -- calling onWillClose")
+        onWillClose?()
+        mbkLog("PopoverController", "onWillClose fired")
         setButtonHighlight(false)
         stopEventMonitor()
         anchorPoint = nil
         overlayGate.hasActiveOverlay = false
         overlayGate.hasFilePickerOverlay = false
         mbkLog("PopoverController", "overlay gate reset on close")
-        onDidClose?()
-        mbkLog("PopoverController", "onDidClose fired")
     }
 }
