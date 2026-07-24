@@ -76,37 +76,38 @@ final class MBKSheetAnchorTask {
 
     func start() {
         mbkLog("AnchoredSheet[\(label)]", "start — hop1 Task queued")
+        // Capture label for use in guard-else branches where self may be nil.
+        let capturedLabel = label
         // Hop 1: actor isolation crossing — does NOT guarantee sheet window exists yet.
         Task { @MainActor [weak self] in
-            guard let self, !cancelled else {
-                mbkLog("AnchoredSheet[\(self?.label ?? label)]", "hop1 — cancelled, aborting")
+            guard let self, !self.cancelled else {
+                mbkLog("AnchoredSheet[\(capturedLabel)]", "hop1 — cancelled or deallocated, aborting")
                 return
             }
-            mbkLog("AnchoredSheet[\(label)]", "hop1 complete — queuing hop2 DispatchQueue")
+            mbkLog("AnchoredSheet[\(self.label)]", "hop1 complete — queuing hop2 DispatchQueue")
             // Hop 2: drain one more runloop turn — sheet NSWindow exists by now.
             DispatchQueue.main.async { [weak self] in
-                guard let self, !cancelled else {
-                    mbkLog("AnchoredSheet[\(self?.label ?? label)]", "hop2 — cancelled, aborting")
+                guard let self, !self.cancelled else {
+                    mbkLog("AnchoredSheet[\(capturedLabel)]", "hop2 — cancelled or deallocated, aborting")
                     return
                 }
-                mbkLog("AnchoredSheet[\(label)]", "hop2 — polling NSApp.windows (count=\(NSApp.windows.count))")
-                let pw = popoverWindow
-                // Log all non-popover candidates for diagnosis
+                let pw = self.popoverWindow
+                mbkLog("AnchoredSheet[\(self.label)]", "hop2 — polling NSApp.windows (count=\(NSApp.windows.count))")
                 for w in NSApp.windows where w !== pw {
-                    mbkLog("AnchoredSheet[\(label)]", "  candidate #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) inSheets=\(pw.sheets.contains(w))")
+                    mbkLog("AnchoredSheet[\(self.label)]", "  candidate #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) inSheets=\(pw.sheets.contains(w))")
                 }
                 guard let sheetWindow = NSApp.windows.first(where: {
                     $0 !== pw &&
                     $0.styleMask == .borderless &&
                     !pw.sheets.contains($0)
                 }) else {
-                    mbkLog("AnchoredSheet[\(label)]", "hop2 — no matching window found")
+                    mbkLog("AnchoredSheet[\(self.label)]", "hop2 — no matching window found")
                     return
                 }
-                mbkLog("AnchoredSheet[\(label)]", "addChildWindow — windowNumber=\(sheetWindow.windowNumber)")
+                mbkLog("AnchoredSheet[\(self.label)]", "addChildWindow — windowNumber=\(sheetWindow.windowNumber)")
                 pw.addChildWindow(sheetWindow, ordered: .above)
-                overlayGate.hasActiveOverlay = true
-                mbkLog("AnchoredSheet[\(label)]", "hasActiveOverlay=true")
+                self.overlayGate.hasActiveOverlay = true
+                mbkLog("AnchoredSheet[\(self.label)]", "hasActiveOverlay=true")
             }
         }
     }
@@ -148,15 +149,15 @@ public struct MBKAnchoredSheetModifier<SheetContent: View>: ViewModifier {
         content
             .sheet(isPresented: $isPresented, content: sheetContent)
             .onChange(of: isPresented) { _, newValue in
-                mbkLog("AnchoredSheet[isPresented]", "onChange newValue=\(newValue) — windows=\(NSApp.windows.count)")
+                mbkLog("AnchoredSheet[isPresented]", "onChange newValue=\(newValue) windows=\(NSApp.windows.count)")
                 if newValue {
                     guard let popoverWindow = NSApp.windows.first(where: {
                         $0.styleMask.contains(.nonactivatingPanel)
                     }) else {
-                        mbkLog("AnchoredSheet[isPresented]", "onChange — no nonactivatingPanel window, aborting")
+                        mbkLog("AnchoredSheet[isPresented]", "onChange — no nonactivatingPanel, aborting")
                         return
                     }
-                    mbkLog("AnchoredSheet[isPresented]", "onChange — popoverWindow #\(popoverWindow.windowNumber), starting anchor task")
+                    mbkLog("AnchoredSheet[isPresented]", "onChange — popoverWindow #\(popoverWindow.windowNumber), starting task")
                     anchorTask = mbkWaitAndAnchorSheetWindow(
                         popoverWindow: popoverWindow,
                         overlayGate: overlayGate,
@@ -186,15 +187,15 @@ public struct MBKAnchoredSheetItemModifier<Item: Identifiable & Equatable, Sheet
             .sheet(item: $item, content: sheetContent)
             .onChange(of: item) { _, newValue in
                 let isPresented = newValue != nil
-                mbkLog("AnchoredSheet[item]", "onChange isPresented=\(isPresented) — windows=\(NSApp.windows.count)")
+                mbkLog("AnchoredSheet[item]", "onChange isPresented=\(isPresented) windows=\(NSApp.windows.count)")
                 if isPresented {
                     guard let popoverWindow = NSApp.windows.first(where: {
                         $0.styleMask.contains(.nonactivatingPanel)
                     }) else {
-                        mbkLog("AnchoredSheet[item]", "onChange — no nonactivatingPanel window, aborting")
+                        mbkLog("AnchoredSheet[item]", "onChange — no nonactivatingPanel, aborting")
                         return
                     }
-                    mbkLog("AnchoredSheet[item]", "onChange — popoverWindow #\(popoverWindow.windowNumber), starting anchor task")
+                    mbkLog("AnchoredSheet[item]", "onChange — popoverWindow #\(popoverWindow.windowNumber), starting task")
                     anchorTask = mbkWaitAndAnchorSheetWindow(
                         popoverWindow: popoverWindow,
                         overlayGate: overlayGate,
