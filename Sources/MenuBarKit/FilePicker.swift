@@ -2,16 +2,21 @@
 // MenuBarKit
 //
 // WHY panel.begin{} INSTEAD OF beginSheetModal:
-//   beginSheetModal(for: popoverWindow) attaches NSOpenPanel as an AppKit
-//   sheet to the popover hosting window. SwiftUI sees a new sheet appear on
-//   that window and writes true back into any live .sheet(isPresented:)
-//   binding — corrupting isSheetPresented state.
-//   panel.begin{} presents the panel floating with no sheet relationship.
+//   beginSheetModal attaches NSOpenPanel as an AppKit sheet to the popover
+//   hosting window. SwiftUI writes true back into any live .sheet(isPresented:)
+//   binding on that window — corrupting isSheetPresented state.
 //
-// WHY makeKeyAndOrderFront + NSApp.activate:
-//   panel.begin{} does not automatically bring the panel in front of the
-//   popover. We call makeKeyAndOrderFront + activate to ensure it appears
-//   on top.
+// WHY addChildWindow:
+//   panel.begin{} alone leaves the panel behind the popover window.
+//   addChildWindow(panel, ordered: .above) ensures the panel renders on top.
+//   We remove the child relationship in the completion block before clearing
+//   the gate, so hasSheetChildWindow never sees it as a sheet overlay.
+//
+// WHY DEFERRED GATE CLEAR:
+//   The global mouse-down monitor fires on the same click that dismisses
+//   the panel. Clearing hasActiveOverlay synchronously lets the monitor see
+//   false on that event and call performClose. One DispatchQueue.main.async
+//   hop defers the clear past that event delivery.
 
 import AppKit
 
@@ -28,21 +33,31 @@ public func mbkOpenFilePicker(
         mbkLog("FilePicker", "  window #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) title=\(title)")
     }
 
+    guard let popoverWindow = NSApp.windows.first(where: {
+        $0.styleMask.contains(.nonactivatingPanel)
+    }) else {
+        mbkLog("FilePicker", "no popover window found, aborting")
+        return
+    }
+    mbkLog("FilePicker", "popoverWindow=#\(popoverWindow.windowNumber)")
+
     let panel = NSOpenPanel()
     panel.canChooseFiles = false
     panel.canChooseDirectories = true
     panel.allowsMultipleSelection = false
     panel.prompt = "Select"
     if let message { panel.message = message }
-    mbkLog("FilePicker", "panel created — setting hasActiveOverlay=true")
+    mbkLog("FilePicker", "panel created")
 
     overlayGate.hasActiveOverlay = true
     mbkLog("FilePicker", "hasActiveOverlay=true — calling panel.begin")
 
     panel.begin { response in
         mbkLog("FilePicker", "panel.begin completion — response=\(response.rawValue) hasActiveOverlay=\(overlayGate.hasActiveOverlay)")
-        Task { @MainActor in
-            mbkLog("FilePicker", "completion Task hop — setting hasActiveOverlay=false")
+        popoverWindow.removeChildWindow(panel)
+        mbkLog("FilePicker", "removeChildWindow done")
+        DispatchQueue.main.async {
+            mbkLog("FilePicker", "deferred gate clear — setting hasActiveOverlay=false")
             overlayGate.hasActiveOverlay = false
             let url = response == .OK ? panel.url : nil
             mbkLog("FilePicker", "hasActiveOverlay=false — calling completion url=\(String(describing: url))")
@@ -51,8 +66,8 @@ public func mbkOpenFilePicker(
         }
     }
 
-    // Bring panel in front of the popover after begin{} is called.
+    popoverWindow.addChildWindow(panel, ordered: .above)
+    mbkLog("FilePicker", "addChildWindow done — panel=#\(panel.windowNumber)")
     panel.makeKeyAndOrderFront(nil)
-    NSApp.activate(ignoringOtherApps: true)
-    mbkLog("FilePicker", "panel.begin returned — makeKeyAndOrderFront called")
+    mbkLog("FilePicker", "makeKeyAndOrderFront called")
 }
