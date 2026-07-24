@@ -10,10 +10,14 @@
 //   addChildWindow creates a parent-child relationship that causes two problems:
 //   1. Clicking outside the app boundary dismisses the child panel.
 //   2. hasSheetChildWindow counts childWindows and triggers forceClose.
-//   .floating (level 3) is BELOW the popover's nonactivatingPanel level,
-//   so the panel ends up behind the popover. Reading the popover's actual
-//   level and adding 1 guarantees the panel is always on top regardless of
-//   what level the popover sits at.
+//   .floating (level 3) is below the popover's nonactivatingPanel level so
+//   the panel ends up behind. Reading the popover's actual level and adding 1
+//   guarantees the panel is always on top.
+//
+// WHY panel.orderOut + close AFTER COMPLETION:
+//   NSOpenPanel windows are not automatically released after panel.begin{}.
+//   Without explicit close they accumulate in NSApp.windows across picker
+//   invocations, confusing window-enumeration logic elsewhere.
 //
 // WHY DEFERRED GATE CLEAR:
 //   The global mouse-down monitor fires on the same click that dismisses the
@@ -56,6 +60,8 @@ public func mbkOpenFilePicker(
 
     panel.begin { response in
         mbkLog("FilePicker", "panel.begin completion — response=\(response.rawValue) hasActiveOverlay=\(overlayGate.hasActiveOverlay)")
+        panel.orderOut(nil)
+        mbkLog("FilePicker", "panel.orderOut called — window count now=\(NSApp.windows.count)")
         DispatchQueue.main.async {
             mbkLog("FilePicker", "deferred gate clear — setting hasActiveOverlay=false")
             overlayGate.hasActiveOverlay = false
