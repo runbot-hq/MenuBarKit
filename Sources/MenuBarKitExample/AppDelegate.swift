@@ -9,15 +9,16 @@
 // Nothing about popover lifecycle, monitors, or window management lives here.
 //
 // SESSION RESPAWN — hook split:
-//   onWillShow  → restore route only. Fires before popover.show(). Safe because
-//                 route has no overlay gate side effects.
-//   onDidShow   → restore isSheetPresented. Fires via Task { @MainActor } after
-//                 popover.show(). AnchoredSheet.onChange(true) arms the gate
-//                 optimistically so popoverShouldClose is blocked immediately,
-//                 then the anchor observer wires the sheet window when it appears.
-//   onDidClose       → snapshot on normal close.
-//   onWillForceClose → snapshot when sheet is open at outside-click time,
-//                      BEFORE gate is cleared and BEFORE isSheetPresented resets.
+//   onWillShow       → restore route only. Fires before popover.show().
+//   onDidShow        → restore isSheetPresented. Fires after popover.show()
+//                       so the popover window exists when AnchoredSheet
+//                       registers its anchor observer.
+//   onDidClose       → save snapshot with sheet=false. Normal close means
+//                       no sheet was visible — if it were, forceClose fires
+//                       instead. Saving appState.isSheetPresented would
+//                       capture a stale true and cause a respawn loop.
+//   onWillForceClose → save snapshot from live AppState — the ONLY case
+//                       where sheet=true is valid to persist.
 
 import AppKit
 import MenuBarKit
@@ -38,31 +39,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         popoverController.setup()
 
-        // Restore route before show() — no gate side effects.
         popoverController.onWillShow = { [weak self] in
             guard let self, let snap = lastSession else { return }
             appState.route = snap.route
             print("[AppDelegate] route restored: \(snap.route)")
         }
 
-        // Restore isSheetPresented after show() — AnchoredSheet arms the gate
-        // optimistically in onChange(true), blocking outside-clicks immediately
-        // even before the sheet window is created.
         popoverController.onDidShow = { [weak self] in
             guard let self, let snap = lastSession else { return }
             appState.isSheetPresented = snap.isSheetPresented
             print("[AppDelegate] isSheetPresented restored: \(snap.isSheetPresented)")
         }
 
-        // Normal close — snapshot after close.
+        // Normal close — sheet is never open here (forceClose handles that).
+        // Always save sheet=false to avoid stale-true respawn loop.
         popoverController.onDidClose = { [weak self] in
             guard let self else { return }
-            lastSession = appState.saveSnapshot()
-            print("[AppDelegate] session saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
+            let snap = AppState.SessionSnapshot(route: appState.route, isSheetPresented: false)
+            lastSession = snap
+            print("[AppDelegate] session saved: route=\(snap.route) sheet=false")
         }
 
-        // Force-close (sheet open + outside click) — snapshot BEFORE gate is
-        // cleared and BEFORE isSheetPresented resets.
+        // Force-close — sheet IS open. Save live state before teardown.
         popoverController.onWillForceClose = { [weak self] in
             guard let self else { return }
             lastSession = appState.saveSnapshot()
