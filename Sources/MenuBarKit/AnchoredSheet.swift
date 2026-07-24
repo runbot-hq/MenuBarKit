@@ -31,8 +31,6 @@
 //      in popoverWindow.sheets. SwiftUI sheet windows added via addChildWindow
 //      never appear in .sheets. This is the definitive discriminator.
 //
-//   These replace the fragile isKeyWindow check from the original spike.
-//
 // GATE TIMING:
 //   hasActiveOverlay is set TRUE only after addChildWindow succeeds.
 //   Never set in onChange — avoids stuck gate if poll finds no window.
@@ -45,19 +43,12 @@
 //
 // WHY Item: Identifiable & Equatable (not just Identifiable):
 //   onChange(of:) requires Equatable so SwiftUI can diff old vs new values.
-//   MBKAnchoredSheetItemModifier uses onChange to observe the full item so it
-//   can re-anchor on non-nil→non-nil identity swaps, which requires Equatable.
 
 import AppKit
 import SwiftUI
 
 // MARK: - Module-level anchor helper
 
-/// Schedules a one-runloop poll to find the SwiftUI sheet window and wire it
-/// as a child of `popoverWindow` via addChildWindow.
-/// Arms overlayGate.hasActiveOverlay ONLY after addChildWindow succeeds.
-/// Returns a cancellable token — call `cancel()` if the sheet is dismissed
-/// before the poll fires.
 @MainActor
 func mbkWaitAndAnchorSheetWindow(
     popoverWindow: NSWindow,
@@ -69,7 +60,6 @@ func mbkWaitAndAnchorSheetWindow(
     return task
 }
 
-/// Cancellable token returned by `mbkWaitAndAnchorSheetWindow`.
 @MainActor
 final class MBKSheetAnchorTask {
     private let popoverWindow: NSWindow
@@ -85,18 +75,15 @@ final class MBKSheetAnchorTask {
 
     func start() {
         DispatchQueue.main.async { [weak self] in
-            guard let self, !self.cancelled else {
-                mbkLog("AnchoredSheet[\(self?.label ?? "")]", "poll cancelled — skipping")
-                return
-            }
+            guard let self, !self.cancelled else { return }
             let pw = self.popoverWindow
-            guard let sheetWindow = NSApp.windows.first(where: {
-                $0 !== pw &&
-                // Exact match — SwiftUI sheet windows have only .borderless.
-                // NSOpenPanel has .titled | .closable | .resizable.
+            // Log all candidate windows so we can see what's being matched/rejected
+            let candidates = NSApp.windows.filter { $0 !== pw }
+            for w in candidates {
+                mbkLog("AnchoredSheet[\(self.label)]", "candidate windowNumber=\(w.windowNumber) styleMask=\(w.styleMask.rawValue) inSheets=\(pw.sheets.contains(w))")
+            }
+            guard let sheetWindow = candidates.first(where: {
                 $0.styleMask == .borderless &&
-                // NSOpenPanel via beginSheetModal appears in pw.sheets;
-                // SwiftUI sheet windows added via addChildWindow do not.
                 !pw.sheets.contains($0)
             }) else {
                 mbkLog("AnchoredSheet[\(self.label)]", "poll — no matching window found")
@@ -109,8 +96,6 @@ final class MBKSheetAnchorTask {
         }
     }
 
-    /// Aborts the pending poll. Gate is not touched — it was never set true
-    /// if addChildWindow has not yet fired.
     func cancel() {
         cancelled = true
         mbkLog("AnchoredSheet[\(label)]", "anchor cancelled")
@@ -120,25 +105,18 @@ final class MBKSheetAnchorTask {
 // MARK: - View extension
 
 public extension View {
-
     func mbkSheet<SheetContent: View>(
         isPresented: Binding<Bool>,
         @ViewBuilder content: @escaping () -> SheetContent
     ) -> some View {
-        modifier(MBKAnchoredSheetModifier(
-            isPresented: isPresented,
-            sheetContent: content
-        ))
+        modifier(MBKAnchoredSheetModifier(isPresented: isPresented, sheetContent: content))
     }
 
     func mbkSheet<Item: Identifiable & Equatable, SheetContent: View>(
         item: Binding<Item?>,
         @ViewBuilder content: @escaping (Item) -> SheetContent
     ) -> some View {
-        modifier(MBKAnchoredSheetItemModifier(
-            item: item,
-            sheetContent: content
-        ))
+        modifier(MBKAnchoredSheetItemModifier(item: item, sheetContent: content))
     }
 }
 
