@@ -1,8 +1,5 @@
 // SheetView.swift
 // MenuBarKitExample
-//
-// Scenario 2 continued — file picker from inside the sheet.
-// Scenario 3 — alert from inside the sheet.
 
 import MenuBarKit
 import SwiftUI
@@ -10,42 +7,38 @@ import SwiftUI
 struct SheetView: View {
     @Environment(AppState.self) private var appState
     @Environment(MBKOverlayGate.self) private var overlayGate
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        let _ = print("[SheetView] body evaluated — showSheetAlert=\(appState.showSheetAlert) gate=\(overlayGate.hasActiveOverlay)")
         @Bindable var appState = appState
-        VStack(spacing: 16) {
-            Text("Sheet").font(.headline)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Sheet").font(.headline).frame(maxWidth: .infinity, alignment: .center)
+            Divider()
 
             GroupBox("Alert from sheet") {
-                Button("Show error alert") { appState.showSheetAlert = true }
+                Button("Show error alert") {
+                    print("[SheetView] Show error alert tapped")
+                    appState.showSheetAlert = true
+                }
                 Text("Alert should appear. Sheet + popover stay alive.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .alert("Simulated Error", isPresented: $appState.showSheetAlert) {
                 Button("OK", role: .cancel) {}
             } message: {
-                Text("This is a test error alert shown from inside a sheet.")
+                Text("This is a test error message.")
             }
 
-            GroupBox("File picker from sheet") {
-                Button("Pick folder (sheet)") {
-                    mbkOpenFilePicker(overlayGate: overlayGate) { url in
-                        appState.sheetPickedURL = url
-                    }
-                }
-                if let path = appState.sheetPickedURL?.path {
-                    Text(path)
-                        .font(.system(size: 11, design: .monospaced))
-                        .lineLimit(1).truncationMode(.middle)
-                }
+            Divider()
+            Button("Close") {
+                print("[SheetView] Close tapped — setting isSheetPresented=false")
+                appState.isSheetPresented = false
             }
-
-            Button("Dismiss") { dismiss() }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.cancelAction)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
-        .padding(24)
-        .frame(minWidth: 280)
+        .padding(16)
+        .fixedSize()
+        .onAppear    { print("[SheetView] onAppear  gate=\(overlayGate.hasActiveOverlay) isSheetPresented=\(appState.isSheetPresented)") }
+        .onDisappear { print("[SheetView] onDisappear gate=\(overlayGate.hasActiveOverlay) isSheetPresented=\(appState.isSheetPresented)") }
     }
 }

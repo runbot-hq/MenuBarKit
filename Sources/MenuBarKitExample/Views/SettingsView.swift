@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var showWideRow = false
 
     var body: some View {
+        let _ = print("[SettingsView] body evaluated — isSheetPresented=\(appState.isSheetPresented) showWideRow=\(showWideRow) gate=\(overlayGate.hasActiveOverlay)")
         @Bindable var appState = appState
         VStack(alignment: .leading, spacing: 12) {
             Text("Settings").font(.headline).frame(maxWidth: .infinity, alignment: .center)
@@ -26,16 +27,21 @@ struct SettingsView: View {
             Divider()
 
             // Scenario 1
-            Button("Open sheet") { appState.isSheetPresented = true }
-                .mbkSheet(isPresented: $appState.isSheetPresented, overlayGate: overlayGate) {
-                    SheetView()
-                        .environment(appState)
-                        .environment(overlayGate)
-                }
+            Button("Open sheet") {
+                print("[SettingsView] Open sheet tapped — setting isSheetPresented=true")
+                appState.isSheetPresented = true
+            }
+            .mbkSheet(isPresented: $appState.isSheetPresented, overlayGate: overlayGate) {
+                SheetView()
+                    .environment(appState)
+                    .environment(overlayGate)
+            }
 
             // Scenario 2
             Button("Pick folder") {
+                print("[SettingsView] Pick folder tapped — gate=\(overlayGate.hasActiveOverlay) isSheetPresented=\(appState.isSheetPresented)")
                 mbkOpenFilePicker(overlayGate: overlayGate) { url in
+                    print("[SettingsView] mbkOpenFilePicker completion — url=\(String(describing: url)) isSheetPresented=\(appState.isSheetPresented)")
                     appState.pickedURL = url
                 }
             }
@@ -47,7 +53,10 @@ struct SettingsView: View {
 
             // Scenario 3
             GroupBox("Alert from popover") {
-                Button("Show alert") { appState.showAlert = true }
+                Button("Show alert") {
+                    print("[SettingsView] Show alert tapped")
+                    appState.showAlert = true
+                }
                 Text("Alert should appear. Popover stays alive.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -61,12 +70,15 @@ struct SettingsView: View {
             }
 
             Divider()
-            Button("← Back") { appState.route = .main }
-                .frame(maxWidth: .infinity, alignment: .center)
+            Button("← Back") {
+                print("[SettingsView] Back tapped")
+                appState.route = .main
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
         .padding(16)
         .fixedSize()
-        .onAppear    { print("[SettingsView] onAppear") }
-        .onDisappear { print("[SettingsView] onDisappear") }
+        .onAppear    { print("[SettingsView] onAppear  isSheetPresented=\(appState.isSheetPresented) gate=\(overlayGate.hasActiveOverlay)") }
+        .onDisappear { print("[SettingsView] onDisappear isSheetPresented=\(appState.isSheetPresented) gate=\(overlayGate.hasActiveOverlay)") }
     }
 }
