@@ -7,23 +7,28 @@
 //   binding on that window — corrupting isSheetPresented state.
 //
 // WHY panel.level = popoverWindow.level + 1, NOT addChildWindow:
-//   addChildWindow creates a parent-child relationship that causes two problems:
+//   addChildWindow creates a parent-child relationship:
 //   1. Clicking outside the app boundary dismisses the child panel.
 //   2. hasSheetChildWindow counts childWindows and triggers forceClose.
-//   .floating (level 3) is below the popover's nonactivatingPanel level so
-//   the panel ends up behind. Reading the popover's actual level and adding 1
-//   guarantees the panel is always on top.
+//   .floating (level 3) is below the popover's nonactivatingPanel level.
+//   Reading the popover's actual level and adding 1 guarantees the panel
+//   is always on top.
 //
-// WHY panel.orderOut + close AFTER COMPLETION:
+// WHY panel.orderOut AFTER COMPLETION:
 //   NSOpenPanel windows are not automatically released after panel.begin{}.
-//   Without explicit close they accumulate in NSApp.windows across picker
-//   invocations, confusing window-enumeration logic elsewhere.
+//   Without explicit orderOut they accumulate in NSApp.windows.
+//
+// WHY gateWasAlreadyArmed / CONCURRENT OVERLAY SAFETY:
+//   If called while a sheet is already open (gate=true), we must not clear
+//   the gate on completion — the sheet is still holding it. We snapshot
+//   the gate state before opening and only clear if we were the ones who
+//   armed it. Mirrors the pattern in MBKAlertModifier.
 //
 // WHY DEFERRED GATE CLEAR:
-//   The global mouse-down monitor fires on the same click that dismisses the
-//   panel. Clearing hasActiveOverlay synchronously lets the monitor see false
-//   on that event and call performClose. One DispatchQueue.main.async hop
-//   defers the clear past that event delivery.
+//   The global mouse-down monitor fires on the same click that dismisses
+//   the panel. Clearing hasActiveOverlay synchronously lets the monitor
+//   see false on that event and call performClose. One
+//   DispatchQueue.main.async hop defers the clear past that delivery.
 
 import AppKit
 
@@ -39,6 +44,10 @@ public func mbkOpenFilePicker(
         let title = w.title.isEmpty ? "<empty>" : w.title
         mbkLog("FilePicker", "  window #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) title=\(title)")
     }
+
+    // Snapshot before we touch the gate.
+    let gateWasAlreadyArmed = overlayGate.hasActiveOverlay
+    mbkLog("FilePicker", "gateWasAlreadyArmed=\(gateWasAlreadyArmed)")
 
     let popoverWindow = NSApp.windows.first {
         $0.styleMask.contains(.nonactivatingPanel)
@@ -59,14 +68,18 @@ public func mbkOpenFilePicker(
     mbkLog("FilePicker", "hasActiveOverlay=true — calling panel.begin")
 
     panel.begin { response in
-        mbkLog("FilePicker", "panel.begin completion — response=\(response.rawValue) hasActiveOverlay=\(overlayGate.hasActiveOverlay)")
+        mbkLog("FilePicker", "panel.begin completion — response=\(response.rawValue) hasActiveOverlay=\(overlayGate.hasActiveOverlay) gateWasAlreadyArmed=\(gateWasAlreadyArmed)")
         panel.orderOut(nil)
         mbkLog("FilePicker", "panel.orderOut called — window count now=\(NSApp.windows.count)")
         DispatchQueue.main.async {
-            mbkLog("FilePicker", "deferred gate clear — setting hasActiveOverlay=false")
-            overlayGate.hasActiveOverlay = false
+            if gateWasAlreadyArmed {
+                mbkLog("FilePicker", "deferred: gate was already armed by concurrent overlay — preserving hasActiveOverlay=true")
+            } else {
+                mbkLog("FilePicker", "deferred gate clear — setting hasActiveOverlay=false")
+                overlayGate.hasActiveOverlay = false
+            }
             let url = response == .OK ? panel.url : nil
-            mbkLog("FilePicker", "hasActiveOverlay=false — calling completion url=\(String(describing: url))")
+            mbkLog("FilePicker", "calling completion url=\(String(describing: url))")
             completion(url)
             mbkLog("FilePicker", "completion done")
         }
