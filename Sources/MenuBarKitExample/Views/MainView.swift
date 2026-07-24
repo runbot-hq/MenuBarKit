@@ -5,7 +5,6 @@ import SwiftUI
 
 struct MainView: View {
     @Environment(AppState.self) private var appState
-    @Environment(MBKOverlayGate.self) private var overlayGate
 
     private let allItems: [(icon: String, label: String)] = [
         ("checkmark.circle.fill",  "Build succeeded"),
@@ -33,7 +32,7 @@ struct MainView: View {
     @State private var visibleCount = 5
 
     var body: some View {
-        let _ = print("[MainView] body evaluated — visibleCount=\(visibleCount) gate=\(overlayGate.hasActiveOverlay)")
+        let _ = print("[MainView] body evaluated — visibleCount=\(visibleCount)")
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Workflows").font(.headline)
@@ -86,7 +85,7 @@ struct MainView: View {
             }
         }
         .fixedSize()
-        .onAppear    { print("[MainView] onAppear visibleCount=\(visibleCount) gate=\(overlayGate.hasActiveOverlay)") }
+        .onAppear    { print("[MainView] onAppear visibleCount=\(visibleCount)") }
         .onDisappear { print("[MainView] onDisappear") }
     }
 
