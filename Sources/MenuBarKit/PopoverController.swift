@@ -67,7 +67,7 @@ public final class MBKPopoverController: NSObject {
     }
 
     @objc private func togglePopover() {
-        mbkLog("PopoverController", "togglePopover — isShown=\(popover.isShown)")
+        mbkLog("PopoverController", "togglePopover -- isShown=\(popover.isShown)")
         if popover.isShown {
             popover.performClose(nil)
         } else {
@@ -77,7 +77,7 @@ public final class MBKPopoverController: NSObject {
 
     private func openPopover() {
         guard let button = statusItem.button else { return }
-        mbkLog("PopoverController", "openPopover — calling onWillShow")
+        mbkLog("PopoverController", "openPopover -- calling onWillShow")
         onWillShow?()
         mbkLog("PopoverController", "onWillShow fired")
 
@@ -93,7 +93,7 @@ public final class MBKPopoverController: NSObject {
         startEventMonitor()
 
         Task { @MainActor in
-            mbkLog("PopoverController", "onDidShow Task hop — calling onDidShow")
+            mbkLog("PopoverController", "onDidShow Task hop -- calling onDidShow")
             self.onDidShow?()
             mbkLog("PopoverController", "onDidShow fired")
         }
@@ -113,40 +113,38 @@ public final class MBKPopoverController: NSObject {
         let hwChildren = hw?.childWindows ?? []
         let pwChildren = pw?.childWindows ?? []
         let same = hw === pw
+        let result = !pwChildren.isEmpty
         mbkLog("PopoverController",
-               "hasSheetChildWindow — hw=#\(hw.map{"\($0.windowNumber)"} ?? "nil") "
-             + "pw=#\(pw.map{"\($0.windowNumber)"} ?? "nil") "
-             + "same=\(same) hwChildren=\(hwChildren.count) pwChildren=\(pwChildren.count) "
-             + "\u2192 \(!pwChildren.isEmpty)")
-        return !pwChildren.isEmpty
+               "hasSheetChildWindow -- hw=#\(hw.map { "\($0.windowNumber)" } ?? "nil") pw=#\(pw.map { "\($0.windowNumber)" } ?? "nil") same=\(same) hwChildren=\(hwChildren.count) pwChildren=\(pwChildren.count) -> \(result)")
+        return result
     }
 
     private func forceClose() {
-        mbkLog("PopoverController", "forceClose — calling onWillForceClose")
+        mbkLog("PopoverController", "forceClose -- calling onWillForceClose")
         onWillForceClose?()
-        mbkLog("PopoverController", "forceClose — clearing gate")
+        mbkLog("PopoverController", "forceClose -- clearing gate")
         overlayGate.hasActiveOverlay = false
         if let pw = panelWindow {
             for child in (pw.childWindows ?? []) {
-                mbkLog("PopoverController", "forceClose — closing child #\(child.windowNumber)")
+                mbkLog("PopoverController", "forceClose -- closing child #\(child.windowNumber)")
                 pw.removeChildWindow(child)
-                // close() instead of orderOut() — sends windowWillClose/windowDidClose,
+                // close() instead of orderOut() -- sends windowWillClose/windowDidClose,
                 // which releases the window from NSApp.windows and tears down its
                 // hosted SwiftUI view tree. orderOut() only hides it, leaving a zombie
                 // view tree that receives @Environment state changes and fires duplicate alerts.
                 child.close()
             }
         } else {
-            mbkLog("PopoverController", "forceClose — no panelWindow found")
+            mbkLog("PopoverController", "forceClose -- no panelWindow found")
         }
-        mbkLog("PopoverController", "forceClose — calling performClose")
+        mbkLog("PopoverController", "forceClose -- calling performClose")
         popover.performClose(nil)
     }
 
     private func positioningRect(for button: NSStatusBarButton) -> NSRect? {
         let bounds = button.bounds
         guard bounds.width > 0, bounds.height > 0 else {
-            mbkLog("PopoverController", "positioningRect — degenerate bounds \(bounds)")
+            mbkLog("PopoverController", "positioningRect -- degenerate bounds \(bounds)")
             return nil
         }
         return NSRect(x: bounds.midX - 0.5, y: bounds.minY, width: 1, height: bounds.height)
@@ -195,15 +193,15 @@ public final class MBKPopoverController: NSObject {
               let window = hostingController.view.window,
               let anchor = anchorPoint else {
             popover.contentSize = clamped
-            mbkLog("PopoverController", "applyContentSize — not shown, recorded (\(clamped.width),\(clamped.height))")
+            mbkLog("PopoverController", "applyContentSize -- not shown, recorded (\(clamped.width),\(clamped.height))")
             return
         }
         mbkLog("PopoverController",
-               "applyContentSize — (\(popover.contentSize.width),\(popover.contentSize.height))\u2192(\(clamped.width),\(clamped.height))")
+               "applyContentSize -- (\(popover.contentSize.width),\(popover.contentSize.height))->(\(clamped.width),\(clamped.height))")
         popover.contentSize = clamped
         let newOrigin = NSPoint(x: anchor.x - window.frame.width / 2, y: anchor.y - window.frame.height)
         window.setFrameOrigin(newOrigin)
-        mbkLog("PopoverController", "applyContentSize — origin set to \(newOrigin)")
+        mbkLog("PopoverController", "applyContentSize -- origin set to \(newOrigin)")
     }
 
     private func setupWorkspaceObserver() {
@@ -216,14 +214,14 @@ public final class MBKPopoverController: NSObject {
             Task { @MainActor [weak self] in
                 guard let self, self.popover.isShown else { return }
                 guard activated != NSRunningApplication.current else {
-                    mbkLog("PopoverController", "workspace observer — self-activation, ignoring")
+                    mbkLog("PopoverController", "workspace observer -- self-activation, ignoring")
                     return
                 }
                 guard !overlayGate.hasActiveOverlay else {
-                    mbkLog("PopoverController", "workspace observer — overlay active, keeping popover open")
+                    mbkLog("PopoverController", "workspace observer -- overlay active, keeping popover open")
                     return
                 }
-                mbkLog("PopoverController", "workspace observer — other app active, closing")
+                mbkLog("PopoverController", "workspace observer -- other app active, closing")
                 self.popover.performClose(nil)
             }
         }
@@ -238,19 +236,18 @@ public final class MBKPopoverController: NSObject {
                 guard let self else { return }
                 let hasOverlay = self.overlayGate.hasActiveOverlay
                 let hasFilePicker = self.overlayGate.hasFilePickerOverlay
-                mbkLog("PopoverController", "event monitor fired — hasActiveOverlay=\(hasOverlay) hasFilePickerOverlay=\(hasFilePicker)")
+                mbkLog("PopoverController", "event monitor fired -- hasActiveOverlay=\(hasOverlay) hasFilePickerOverlay=\(hasFilePicker)")
                 if hasOverlay {
                     if hasFilePicker {
-                        // Click is going to the floating file picker panel — never forceClose.
-                        mbkLog("PopoverController", "event monitor — file picker active, ignoring outside click")
+                        mbkLog("PopoverController", "event monitor -- file picker active, ignoring outside click")
                     } else if self.hasSheetChildWindow {
-                        mbkLog("PopoverController", "event monitor — sheet overlay, force-closing")
+                        mbkLog("PopoverController", "event monitor -- sheet overlay, force-closing")
                         self.forceClose()
                     } else {
-                        mbkLog("PopoverController", "event monitor — picker/alert overlay, ignoring outside click")
+                        mbkLog("PopoverController", "event monitor -- picker/alert overlay, ignoring outside click")
                     }
                 } else {
-                    mbkLog("PopoverController", "event monitor — no overlay, performClose")
+                    mbkLog("PopoverController", "event monitor -- no overlay, performClose")
                     self.popover.performClose(nil)
                 }
             }
@@ -279,16 +276,16 @@ extension MBKPopoverController: NSPopoverDelegate {
     public func popoverWillShow(_ notification: Notification) {
         setButtonHighlight(true)
         guard let window = hostingController.view.window else {
-            mbkLog("PopoverController", "popoverWillShow — no hostingWindow yet")
+            mbkLog("PopoverController", "popoverWillShow -- no hostingWindow yet")
             return
         }
         anchorPoint = NSPoint(x: window.frame.midX, y: window.frame.maxY)
-        mbkLog("PopoverController", "popoverWillShow — anchor=\(anchorPoint!) hostingWindow=#\(window.windowNumber)")
+        mbkLog("PopoverController", "popoverWillShow -- anchor=\(anchorPoint!) hostingWindow=#\(window.windowNumber)")
     }
 
     public func popoverShouldClose(_ popover: NSPopover) -> Bool {
         let block = overlayGate.hasActiveOverlay
-        mbkLog("PopoverController", "popoverShouldClose — hasActiveOverlay=\(block) blocked=\(block)")
+        mbkLog("PopoverController", "popoverShouldClose -- hasActiveOverlay=\(block) blocked=\(block)")
         return !block
     }
 
