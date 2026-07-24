@@ -13,22 +13,29 @@ enum Route: Equatable {
 @MainActor
 final class AppState {
     var route: Route = .main {
-        didSet { print("[AppState] route: \(oldValue) → \(self.route) | Thread=\(Thread.isMainThread ? \"main\" : \"bg\")") }
+        didSet { AppState.log("route", oldValue, route) }
     }
     var isSheetPresented: Bool = false {
-        didSet { print("[AppState] isSheetPresented: \(oldValue) → \(self.isSheetPresented) | Thread=\(Thread.isMainThread ? \"main\" : \"bg\")") }
+        didSet { AppState.log("isSheetPresented", oldValue, isSheetPresented) }
     }
     var pickedURL: URL? {
-        didSet { print("[AppState] pickedURL: \(String(describing: self.pickedURL))") }
+        didSet { print("[AppState] pickedURL: \(String(describing: pickedURL))") }
     }
     var sheetPickedURL: URL? {
-        didSet { print("[AppState] sheetPickedURL: \(String(describing: self.sheetPickedURL))") }
+        didSet { print("[AppState] sheetPickedURL: \(String(describing: sheetPickedURL))") }
     }
     var showAlert: Bool = false {
-        didSet { print("[AppState] showAlert: \(oldValue) → \(self.showAlert)") }
+        didSet { AppState.log("showAlert", oldValue, showAlert) }
     }
     var showSheetAlert: Bool = false {
-        didSet { print("[AppState] showSheetAlert: \(oldValue) → \(self.showSheetAlert)") }
+        didSet { AppState.log("showSheetAlert", oldValue, showSheetAlert) }
+    }
+
+    // Static helper — lives outside @Observable macro expansion,
+    // so Thread and escaped quotes work without compiler issues.
+    private static func log<T>(_ name: String, _ old: T, _ new: T) {
+        let thread = Thread.isMainThread ? "main" : "bg"
+        print("[AppState] \(name): \(old) -> \(new) | Thread=\(thread)")
     }
 
     struct SessionSnapshot {
