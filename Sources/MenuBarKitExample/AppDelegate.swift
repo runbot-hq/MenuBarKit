@@ -31,18 +31,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onDidShow = { [weak self] in
             guard let self, let snap = lastSession else { return }
             print("[AppDelegate] onDidShow -- restoring isSheetPresented=\(snap.isSheetPresented)")
-            // Clear before restoring so a second onDidShow (e.g. file picker respawn)
-            // does not re-fire sheet=true on a session that already ran.
             lastSession = AppState.SessionSnapshot(route: snap.route, isSheetPresented: false)
             appState.isSheetPresented = snap.isSheetPresented
         }
 
-        popoverController.onWillClose = { [weak self] in
+        popoverController.onWillClose = { [weak self] wasForced in
             guard let self else { return }
-            // Fires before any teardown in both normal and force-close paths,
-            // so host state is always intact when this snapshot is taken.
             lastSession = appState.saveSnapshot()
-            print("[AppDelegate] onWillClose -- session saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
+            print("[AppDelegate] onWillClose wasForced=\(wasForced) -- session saved: route=\(lastSession!.route) sheet=\(lastSession!.isSheetPresented)")
+            if wasForced {
+                // Reset live sheet state so SwiftUI tears down the sheet window
+                // before forceClose() closes the child window and performClose fires.
+                appState.isSheetPresented = false
+            }
         }
 
         print("[AppDelegate] setup complete")

@@ -17,7 +17,7 @@ public final class MBKPopoverController: NSObject {
 
     public var onWillShow: (() -> Void)?
     public var onDidShow: (() -> Void)?
-    public var onWillClose: (() -> Void)?
+    public var onWillClose: ((_ wasForced: Bool) -> Void)?
 
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
@@ -26,8 +26,6 @@ public final class MBKPopoverController: NSObject {
     nonisolated(unsafe) private var eventMonitor: Any?
     nonisolated(unsafe) private var workspaceObserver: NSObjectProtocol?
     private var anchorPoint: NSPoint?
-    /// Guards against onWillClose firing twice when forceClose() calls performClose(),
-    /// which subsequently triggers popoverDidClose.
     private var onWillCloseFired = false
 
     public init<Content: View>(
@@ -121,19 +119,19 @@ public final class MBKPopoverController: NSObject {
         return result
     }
 
-    private func fireOnWillClose() {
+    private func fireOnWillClose(wasForced: Bool) {
         guard !onWillCloseFired else {
             mbkLog("PopoverController", "onWillClose already fired, skipping")
             return
         }
         onWillCloseFired = true
-        mbkLog("PopoverController", "calling onWillClose")
-        onWillClose?()
+        mbkLog("PopoverController", "calling onWillClose wasForced=\(wasForced)")
+        onWillClose?(wasForced)
         mbkLog("PopoverController", "onWillClose fired")
     }
 
     private func forceClose() {
-        fireOnWillClose()
+        fireOnWillClose(wasForced: true)
         mbkLog("PopoverController", "forceClose -- clearing gate")
         overlayGate.hasActiveOverlay = false
         if let pw = panelWindow {
@@ -302,7 +300,7 @@ extension MBKPopoverController: NSPopoverDelegate {
     }
 
     public func popoverDidClose(_ notification: Notification) {
-        fireOnWillClose()
+        fireOnWillClose(wasForced: false)
         setButtonHighlight(false)
         stopEventMonitor()
         anchorPoint = nil
