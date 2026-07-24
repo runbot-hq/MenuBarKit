@@ -117,7 +117,7 @@ public final class MBKPopoverController: NSObject {
                "hasSheetChildWindow — hw=#\(hw.map{"\($0.windowNumber)"} ?? "nil") "
              + "pw=#\(pw.map{"\($0.windowNumber)"} ?? "nil") "
              + "same=\(same) hwChildren=\(hwChildren.count) pwChildren=\(pwChildren.count) "
-             + "→ \(!pwChildren.isEmpty)")
+             + "\u2192 \(!pwChildren.isEmpty)")
         return !pwChildren.isEmpty
     }
 
@@ -128,9 +128,13 @@ public final class MBKPopoverController: NSObject {
         overlayGate.hasActiveOverlay = false
         if let pw = panelWindow {
             for child in (pw.childWindows ?? []) {
-                mbkLog("PopoverController", "forceClose — removing child #\(child.windowNumber)")
+                mbkLog("PopoverController", "forceClose — closing child #\(child.windowNumber)")
                 pw.removeChildWindow(child)
-                child.orderOut(nil)
+                // close() instead of orderOut() — sends windowWillClose/windowDidClose,
+                // which releases the window from NSApp.windows and tears down its
+                // hosted SwiftUI view tree. orderOut() only hides it, leaving a zombie
+                // view tree that receives @Environment state changes and fires duplicate alerts.
+                child.close()
             }
         } else {
             mbkLog("PopoverController", "forceClose — no panelWindow found")
@@ -195,7 +199,7 @@ public final class MBKPopoverController: NSObject {
             return
         }
         mbkLog("PopoverController",
-               "applyContentSize — (\(popover.contentSize.width),\(popover.contentSize.height))→(\(clamped.width),\(clamped.height))")
+               "applyContentSize — (\(popover.contentSize.width),\(popover.contentSize.height))\u2192(\(clamped.width),\(clamped.height))")
         popover.contentSize = clamped
         let newOrigin = NSPoint(x: anchor.x - window.frame.width / 2, y: anchor.y - window.frame.height)
         window.setFrameOrigin(newOrigin)
