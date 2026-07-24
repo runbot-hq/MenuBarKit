@@ -5,7 +5,7 @@ import AppKit
 import SwiftUI
 
 @MainActor
-public final class MBKPopoverController: NSObject {
+public final class MBKPopoverController: NSObject, MBKPopoverControllerProtocol {
 
     // MARK: - Configuration
 
