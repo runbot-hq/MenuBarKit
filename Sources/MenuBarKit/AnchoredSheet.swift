@@ -50,11 +50,9 @@ final class MBKSheetAnchorTask {
                 let allWindows = NSApp.windows
                 mbkLog("AnchoredSheet[\(self.label)]", "hop2 — polling \(allWindows.count) windows")
                 for w in allWindows where w !== pw {
+                    let title = w.title.isEmpty ? "<empty>" : w.title
                     mbkLog("AnchoredSheet[\(self.label)]",
-                           "  candidate #\(w.windowNumber) styleMask=\(w.styleMask.rawValue)"
-                           + " isKey=\(w.isKeyWindow) borderless=\(w.styleMask == .borderless)"
-                           + " inSheets=\(pw.sheets.contains(w))"
-                           + " title=\(w.title.isEmpty ? \"<empty>\" : w.title)")
+                           "  candidate #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) borderless=\(w.styleMask == .borderless) inSheets=\(pw.sheets.contains(w)) title=\(title)")
                 }
                 guard let sheetWindow = allWindows.first(where: {
                     $0 !== pw &&
@@ -77,7 +75,6 @@ final class MBKSheetAnchorTask {
     }
 
     deinit {
-        // deinit is nonisolated so can't call mbkLog directly
         print("[MBK:AnchoredSheet[\(label)]] deinit")
     }
 }

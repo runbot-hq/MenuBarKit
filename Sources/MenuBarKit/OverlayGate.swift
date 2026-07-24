@@ -1,6 +1,7 @@
 // OverlayGate.swift
 // MenuBarKit
 
+import Foundation
 import Observation
 
 @Observable
@@ -8,7 +9,9 @@ import Observation
 public final class MBKOverlayGate {
     public var hasActiveOverlay: Bool = false {
         didSet {
-            mbkLog("OverlayGate", "hasActiveOverlay: \(oldValue) → \(self.hasActiveOverlay) | caller=\(Thread.callStackSymbols[1])")
+            // Thread.callStackSymbols not available inside @Observable macro expansion;
+            // log the flip with old/new values only.
+            mbkLog("OverlayGate", "hasActiveOverlay: \(oldValue) → \(self.hasActiveOverlay)")
         }
     }
     public init() {

@@ -12,7 +12,8 @@ public func mbkOpenFilePicker(
     mbkLog("FilePicker", "mbkOpenFilePicker called — overlayGate.hasActiveOverlay=\(overlayGate.hasActiveOverlay)")
     mbkLog("FilePicker", "window count=\(NSApp.windows.count)")
     for w in NSApp.windows {
-        mbkLog("FilePicker", "  window #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) title=\(w.title.isEmpty ? \"<empty>\" : w.title)")
+        let title = w.title.isEmpty ? "<empty>" : w.title
+        mbkLog("FilePicker", "  window #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) title=\(title)")
     }
 
     guard let window = NSApp.windows.first(where: {
@@ -39,8 +40,9 @@ public func mbkOpenFilePicker(
         Task { @MainActor in
             mbkLog("FilePicker", "completion Task hop — setting hasActiveOverlay=false")
             overlayGate.hasActiveOverlay = false
-            mbkLog("FilePicker", "hasActiveOverlay=false — calling completion url=\(String(describing: response == .OK ? panel.url : nil))")
-            completion(response == .OK ? panel.url : nil)
+            let url = response == .OK ? panel.url : nil
+            mbkLog("FilePicker", "hasActiveOverlay=false — calling completion url=\(String(describing: url))")
+            completion(url)
             mbkLog("FilePicker", "completion done")
         }
     }
