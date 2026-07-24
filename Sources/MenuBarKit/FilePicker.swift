@@ -5,9 +5,13 @@
 //   beginSheetModal(for: popoverWindow) attaches NSOpenPanel as an AppKit
 //   sheet to the popover hosting window. SwiftUI sees a new sheet appear on
 //   that window and writes true back into any live .sheet(isPresented:)
-//   binding on the same window — corrupting isSheetPresented state.
-//   panel.begin{} presents the panel as a floating window with no sheet
-//   relationship to any window, so SwiftUI never fires that writeback.
+//   binding — corrupting isSheetPresented state.
+//   panel.begin{} presents the panel floating with no sheet relationship.
+//
+// WHY makeKeyAndOrderFront + NSApp.activate:
+//   panel.begin{} does not automatically bring the panel in front of the
+//   popover. We call makeKeyAndOrderFront + activate to ensure it appears
+//   on top.
 
 import AppKit
 
@@ -33,7 +37,7 @@ public func mbkOpenFilePicker(
     mbkLog("FilePicker", "panel created — setting hasActiveOverlay=true")
 
     overlayGate.hasActiveOverlay = true
-    mbkLog("FilePicker", "hasActiveOverlay=true — calling panel.begin (floating, no sheet attachment)")
+    mbkLog("FilePicker", "hasActiveOverlay=true — calling panel.begin")
 
     panel.begin { response in
         mbkLog("FilePicker", "panel.begin completion — response=\(response.rawValue) hasActiveOverlay=\(overlayGate.hasActiveOverlay)")
@@ -46,5 +50,9 @@ public func mbkOpenFilePicker(
             mbkLog("FilePicker", "completion done")
         }
     }
-    mbkLog("FilePicker", "panel.begin returned (panel is now showing)")
+
+    // Bring panel in front of the popover after begin{} is called.
+    panel.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    mbkLog("FilePicker", "panel.begin returned — makeKeyAndOrderFront called")
 }
