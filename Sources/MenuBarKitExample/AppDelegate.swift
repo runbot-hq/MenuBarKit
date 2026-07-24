@@ -61,18 +61,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popoverController.onWillForceClose = { [weak self] in
             guard let self else { print("[AppDelegate] onWillForceClose -- self nil"); return }
-            // Reset isSheetPresented on the live AppState FIRST so SwiftUI dismisses
-            // the sheet cleanly before forceClose tears down the window. Without this,
-            // isSheetPresented stays true across the close/reopen cycle and onDidShow
-            // restores sheet=true on top of the already-alive SwiftUI presentation,
-            // producing a duplicate sheet with two SheetView instances.
-            print("[AppDelegate] onWillForceClose -- resetting isSheetPresented to false")
-            appState.isSheetPresented = false
-            // Save snapshot with sheet=false so restore does not re-open the sheet.
+            // Snapshot FIRST with sheet=true so restore will reopen the sheet on next show.
             let snap = appState.saveSnapshot()
             print("[AppDelegate] onWillForceClose -- saving route=\(snap.route) sheet=\(snap.isSheetPresented)")
             lastSession = snap
             print("[AppDelegate] session force-saved: route=\(snap.route) sheet=\(snap.isSheetPresented)")
+            // NOW reset the live state so SwiftUI dismisses the sheet cleanly before
+            // forceClose tears down the NSWindow. Without this the binding stays true
+            // and the next open would create a duplicate sheet on top of the live one.
+            print("[AppDelegate] onWillForceClose -- resetting isSheetPresented to false")
+            appState.isSheetPresented = false
         }
 
         print("[AppDelegate] setup complete")
