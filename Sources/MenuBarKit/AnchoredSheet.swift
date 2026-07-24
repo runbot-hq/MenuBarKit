@@ -8,24 +8,19 @@
 //     - The popover can be closed by an outside-click while the sheet is open.
 //
 // SOLUTION:
-//   After SwiftUI presents the sheet, observe NSWindow.didBecomeKeyNotification.
-//   When a borderless window that is not the popover window becomes key, wire it
+//   After SwiftUI presents the sheet, poll NSApp.windows one runloop later
+//   via DispatchQueue.main.async to find the new sheet window and wire it
 //   as a child of the popover window via addChildWindow(_:ordered:).
 //
-// GATE TIMING:
-//   hasActiveOverlay is set TRUE only after addChildWindow succeeds inside the
-//   notification callback — never optimistically in onChange. This eliminates
-//   the stuck-gate failure mode where onChange(true) fires during SwiftUI's
-//   initial render or session restore, no sheet window ever appears, and
-//   nothing clears the gate.
+// WHY DispatchQueue.main.async (not NSWindow.didBecomeKeyNotification):
+//   On session restore, onChange(true) fires and the sheet window is created
+//   by SwiftUI in the same runloop turn. By the time a notification observer
+//   is registered, didBecomeKeyNotification has already fired and the window
+//   is missed. DispatchQueue.main.async polls one runloop later and catches
+//   the window regardless of registration timing.
 //
-//   hasActiveOverlay is set FALSE synchronously in onChange(false) —
-//   unconditionally, regardless of whether addChildWindow was ever called.
-//   cancel() does NOT touch the gate for the same reason: if cancel() is
-//   called before addChildWindow fired, the gate was never set true.
-//
-// ANCHOR OBSERVER DISCRIMINATORS:
-//   Two guards in the observer reject NSOpenPanel and other non-sheet windows:
+// SHEET WINDOW DISCRIMINATORS:
+//   Two predicates identify the SwiftUI sheet window and reject NSOpenPanel:
 //
 //   1. window.styleMask == .borderless (exact equality, not .contains)
 //      SwiftUI sheet windows have exactly .borderless and no other bits.
@@ -36,30 +31,17 @@
 //      in popoverWindow.sheets. SwiftUI sheet windows added via addChildWindow
 //      never appear in .sheets. This is the definitive discriminator.
 //
-//   These guards make the stale anchor observer registered during session
-//   restore harmless: it waits forever but can never misfire on picker/alert.
+//   These replace the fragile isKeyWindow check from the original spike.
 //
-// SESSION RESTORE:
-//   When isSheetPresented is restored via onDidShow, onChange(true) fires and
-//   registers an anchor observer. SwiftUI does not re-present the sheet window
-//   automatically, so the observer waits indefinitely. This is safe because:
-//     - The gate is never armed (addChildWindow never fires)
-//     - The discriminators ensure picker/alert cannot satisfy the observer
-//     - The observer is cancelled and cleaned up when the user opens and then
-//       dismisses the sheet (onChange(false) -> cancel())
+// GATE TIMING:
+//   hasActiveOverlay is set TRUE only after addChildWindow succeeds.
+//   Never set in onChange — avoids stuck gate if poll finds no window.
+//   Set FALSE unconditionally in onChange(false) — always clears on dismiss.
 //
-// WHY NO withCheckedContinuation:
-//   withCheckedContinuation suspends the calling Task off @MainActor, making
-//   the resume closure nonisolated/Sendable. Every @MainActor access inside it
-//   becomes an async hop — addChildWindow fires one runloop cycle too late.
-//   Direct observer registration + MainActor.assumeIsolated keeps everything
-//   synchronous on the main thread.
-//
-// WHY notification.object IS EXTRACTED BEFORE assumeIsolated:
-//   The NotificationCenter closure parameter `notification` is non-Sendable.
-//   Capturing it inside assumeIsolated crosses an isolation boundary (SE-0430).
-//   Extracting `notification.object as? NSWindow` before the call captures
-//   only the NSWindow pointer.
+// CANCELLATION:
+//   cancel() sets a flag. The DispatchQueue.main.async closure checks it
+//   before anchoring — if the sheet was dismissed before the poll fires,
+//   no child window is created and the gate stays false.
 //
 // WHY Item: Identifiable & Equatable (not just Identifiable):
 //   onChange(of:) requires Equatable so SwiftUI can diff old vs new values.
@@ -71,11 +53,11 @@ import SwiftUI
 
 // MARK: - Module-level anchor helper
 
-/// Observes NSWindow.didBecomeKeyNotification and wires the first matching
-/// SwiftUI sheet window as a child of `popoverWindow` via addChildWindow.
+/// Schedules a one-runloop poll to find the SwiftUI sheet window and wire it
+/// as a child of `popoverWindow` via addChildWindow.
 /// Arms overlayGate.hasActiveOverlay ONLY after addChildWindow succeeds.
 /// Returns a cancellable token — call `cancel()` if the sheet is dismissed
-/// before its window appeared.
+/// before the poll fires.
 @MainActor
 func mbkWaitAndAnchorSheetWindow(
     popoverWindow: NSWindow,
@@ -93,7 +75,6 @@ final class MBKSheetAnchorTask {
     private let popoverWindow: NSWindow
     private let overlayGate: MBKOverlayGate
     private let label: String
-    private var observer: NSObjectProtocol?
     private var cancelled = false
 
     init(popoverWindow: NSWindow, overlayGate: MBKOverlayGate, label: String) {
@@ -103,59 +84,43 @@ final class MBKSheetAnchorTask {
     }
 
     func start() {
-        observer = NotificationCenter.default.addObserver(
-            forName: NSWindow.didBecomeKeyNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            let candidate = notification.object as? NSWindow
-            MainActor.assumeIsolated {
-                guard let self, !self.cancelled else { return }
-                guard
-                    let window = candidate,
-                    window !== self.popoverWindow,
-                    // Exact match — SwiftUI sheet windows have only .borderless.
-                    // NSOpenPanel has .titled | .closable | .resizable even as a sheet modal.
-                    window.styleMask == .borderless,
-                    // Definitive discriminator: NSOpenPanel attached via beginSheetModal
-                    // appears in popoverWindow.sheets; SwiftUI sheet windows do not.
-                    !self.popoverWindow.sheets.contains(window)
-                else { return }
-                self.removeObserver()
-                mbkLog("AnchoredSheet[\(self.label)]", "addChildWindow — windowNumber=\(window.windowNumber)")
-                self.popoverWindow.addChildWindow(window, ordered: .above)
-                // Arm gate AFTER addChildWindow — never before.
-                self.overlayGate.hasActiveOverlay = true
-                mbkLog("AnchoredSheet[\(self.label)]", "hasActiveOverlay=true")
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.cancelled else {
+                mbkLog("AnchoredSheet[\(self?.label ?? "")]", "poll cancelled — skipping")
+                return
             }
+            let pw = self.popoverWindow
+            guard let sheetWindow = NSApp.windows.first(where: {
+                $0 !== pw &&
+                // Exact match — SwiftUI sheet windows have only .borderless.
+                // NSOpenPanel has .titled | .closable | .resizable.
+                $0.styleMask == .borderless &&
+                // NSOpenPanel via beginSheetModal appears in pw.sheets;
+                // SwiftUI sheet windows added via addChildWindow do not.
+                !pw.sheets.contains($0)
+            }) else {
+                mbkLog("AnchoredSheet[\(self.label)]", "poll — no matching window found")
+                return
+            }
+            mbkLog("AnchoredSheet[\(self.label)]", "addChildWindow — windowNumber=\(sheetWindow.windowNumber)")
+            pw.addChildWindow(sheetWindow, ordered: .above)
+            self.overlayGate.hasActiveOverlay = true
+            mbkLog("AnchoredSheet[\(self.label)]", "hasActiveOverlay=true")
         }
     }
 
-    /// Aborts the wait. Gate is not touched — if addChildWindow never fired,
-    /// the gate was never set true so there is nothing to clear.
+    /// Aborts the pending poll. Gate is not touched — it was never set true
+    /// if addChildWindow has not yet fired.
     func cancel() {
         cancelled = true
-        removeObserver()
         mbkLog("AnchoredSheet[\(label)]", "anchor cancelled")
-    }
-
-    private func removeObserver() {
-        if let obs = observer {
-            NotificationCenter.default.removeObserver(obs)
-            observer = nil
-        }
     }
 }
 
 // MARK: - View extension
 
-/// View extension providing `mbkSheet` modifiers for popover-anchored sheet presentation.
-/// Reads `MBKOverlayGate` from the SwiftUI environment — inject it at the root view
-/// via `.environment(overlayGate)` and no `overlayGate:` parameter is needed at call sites.
 public extension View {
 
-    /// Presents a sheet anchored as a child of the popover window so it
-    /// survives outside-clicks and stays visible when the popover loses focus.
     func mbkSheet<SheetContent: View>(
         isPresented: Binding<Bool>,
         @ViewBuilder content: @escaping () -> SheetContent
@@ -166,9 +131,6 @@ public extension View {
         ))
     }
 
-    /// Presents a sheet anchored as a child of the popover window, driven by
-    /// an optional item binding — matching SwiftUI's `.sheet(item:)` API shape.
-    /// `Item` must conform to both `Identifiable` and `Equatable` — see file header.
     func mbkSheet<Item: Identifiable & Equatable, SheetContent: View>(
         item: Binding<Item?>,
         @ViewBuilder content: @escaping (Item) -> SheetContent
