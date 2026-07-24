@@ -25,12 +25,12 @@ A Swift package for the NSPopover + SwiftUI sheet + NSOpenPanel + alert layer of
 
 | File | What it provides |
 |---|---|
-| `OverlayGate.swift` | `MBKOverlayGate` — `@Observable @MainActor` class; single `Bool` that blocks popover dismiss while any overlay is live |
-| `PopoverController.swift` | `MBKPopoverController` — full `NSPopover` + `NSStatusItem` lifecycle; outside-click monitor; workspace app-switch observer |
+| `OverlayGate.swift` | `MBKOverlayGate` — `@Observable @MainActor` class; `hasActiveOverlay` blocks popover dismiss while any overlay is live; `hasFilePickerOverlay` distinguishes file picker presence so outside clicks are ignored during a pick |
+| `PopoverController.swift` | `MBKPopoverController` — full `NSPopover` + `NSStatusItem` lifecycle; outside-click monitor; workspace app-switch observer; `onWillClose(wasForced:)` callback fires before any teardown on both normal and force-close paths |
 | `AnchoredSheet.swift` | `.mbkSheet(isPresented:overlayGate:content:)` and `.mbkSheet(item:overlayGate:content:)` — SwiftUI sheet anchored as a child window of the popover so it survives outside-clicks and focus changes |
-| `FilePicker.swift` | `mbkOpenFilePicker(target:overlayGate:message:completion:)` — `NSOpenPanel` via `beginSheetModal`, anchored to the correct window (popover or sheet child) |
+| `FilePicker.swift` | `mbkOpenFilePicker(target:overlayGate:message:completion:)` — `NSOpenPanel` via `panel.begin`, level set above the popover, gate cleared in completion handler |
 | `Alert.swift` | `.mbkAlert(_:isPresented:overlayGate:actions:)` and `.mbkAlert(_:isPresented:overlayGate:actions:message:)` — drop-in replacement for `.alert()` that gates `MBKOverlayGate` for the full alert lifetime, including safe handling of alerts presented while a sheet is concurrently open |
-| `Logging.swift` | `mbkLog()` — `#if DEBUG`-gated, `@inlinable`, zero-cost in release |
+| `Logging.swift` | `mbkLog()` — `#if DEBUG`-gated, `@inlinable`, zero-cost in release; route to your own logger via `MBKLogHandler` |
 
 ## Usage
 
@@ -42,46 +42,60 @@ let gate = MBKOverlayGate()
 let controller = MBKPopoverController(rootView: ContentView(), overlayGate: gate)
 controller.setup() // call from applicationDidFinishLaunching
 
-// 3a. Sheet — Bool binding
+// 3. Lifecycle callbacks
+controller.onWillShow = {
+    // restore route — fires before popover.show()
+}
+controller.onDidShow = {
+    // restore sheet state — fires after one render cycle
+}
+controller.onWillClose = { wasForced in
+    // snapshot everything — fires before any teardown
+    // wasForced=true: user clicked outside while sheet was open
+    // wasForced=false: normal user-dismissed close
+}
+
+// 4a. Sheet — Bool binding
 .mbkSheet(isPresented: $showSettings, overlayGate: gate) {
     SettingsView()
 }
 
-// 3b. Sheet — optional Identifiable & Equatable item binding
+// 4b. Sheet — optional Identifiable & Equatable item binding
 .mbkSheet(item: $editingItem, overlayGate: gate) { item in
     ItemDetailView(item: item)
 }
 
-// 4. File picker from popover context
+// 5. File picker from popover context
 mbkOpenFilePicker(target: .popover, overlayGate: gate) { url in
     // handle url
 }
 
-// 5. File picker from sheet context, with in-panel message
+// 6. File picker from sheet context, with in-panel message
 mbkOpenFilePicker(target: .sheet, overlayGate: gate, message: "Select a directory") { url in
     // handle url
 }
 
-// 6. Alert — gate managed automatically; safe when a sheet is concurrently open
+// 7. Alert — gate managed automatically; safe when a sheet is concurrently open
 .mbkAlert("Something went wrong", isPresented: $showAlert, overlayGate: gate) {
     Button("OK", role: .cancel) {}
 } message: {
     Text("Please try again.")
 }
+
+// 8. Custom log handler (optional — set before setup())
+MBKLogHandler = { subsystem, message in
+    logger.debug("[MBK:\(subsystem)] \(message)")
+}
 ```
 
 ## Known limitations
 
-This package is **work in progress**. Known issues are documented inline with `// SPIKE ONLY`, `#warning`, and `TARGET IMPLEMENTATION` comments. The main ones:
-
-- **Dismiss-safety gap** — `overlayGate.hasActiveOverlay` clears before AppKit finishes tearing down the sheet child window. Affects both sheet variants. Fix: replace the SwiftUI binding observation with `NSWindow.didBecomeKeyNotification` tracking — see `TARGET IMPLEMENTATION` in `AnchoredSheet.swift`.
-- **`DispatchQueue.main.async` in `anchorSheetWindow()`** — mixes GCD with Swift concurrency. Gated by `#warning`. To be replaced with the notification-based approach.
-- **`sheetChildWindow` predicate is intentionally weak** — works for single-child-window environments only. See `FilePicker.swift` before strengthening.
+- **`DispatchQueue.main.async` in `MBKSheetAnchorTask`** — hop2 of the two-hop sheet anchor still uses GCD inside a Swift concurrency context. Works correctly in practice but is impure. To be replaced with a `Task` hop or `NSWindow.didBecomeKeyNotification` observation.
+- **Sheet window predicate is heuristic** — `AnchoredSheet` finds the sheet window by `styleMask.contains(.borderless) && isKeyWindow`. Works for single-sheet environments; may need strengthening if multiple borderless windows are present simultaneously.
 
 ## Open tasks
 
-- [ ] Replace `DispatchQueue.main.async` in `anchorSheetWindow()` with `NSWindow.didBecomeKeyNotification` (see `TARGET IMPLEMENTATION` in `AnchoredSheet.swift`)
-- [ ] Fix dismiss-safety gap — tie gate lifetime to window lifecycle, not SwiftUI binding state
-- [ ] Strengthen `sheetChildWindow` predicate for multi-child-window environments
-- [ ] Add more test coverage (gate teardown paths, popover delegate logic)
+- [ ] Replace `DispatchQueue.main.async` in `MBKSheetAnchorTask` with a pure Swift concurrency hop
+- [ ] Strengthen sheet window predicate for multi-window environments
+- [ ] Add more test coverage (gate teardown paths, popover delegate logic, force-close path)
 - [ ] Remove explicit `overlayGate:` parameter from all MBK modifiers — resolve via `@Environment` internally (see [#2](https://github.com/runbot-hq/MenuBarKit/issues/2))
