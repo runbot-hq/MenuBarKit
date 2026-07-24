@@ -43,8 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             let sheetValue = snap.isSheetPresented
             print("[AppDelegate] onDidShow -- will restore isSheetPresented=\(sheetValue)")
-            // Clear BEFORE restoring so a second onDidShow (e.g. picker respawn)
-            // does not re-fire sheet=true on a session that already ran.
+            // Clear BEFORE restoring so a second onDidShow does not re-fire.
             lastSession = AppState.SessionSnapshot(route: snap.route, isSheetPresented: false)
             print("[AppDelegate] onDidShow -- lastSession.isSheetPresented cleared to false")
             appState.isSheetPresented = sheetValue
@@ -53,6 +52,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popoverController.onDidClose = { [weak self] in
             guard let self else { print("[AppDelegate] onDidClose -- self nil"); return }
+            // If onWillForceClose already saved the snapshot (with sheet=true), don't
+            // overwrite it here — by this point isSheetPresented is already false and
+            // we would lose the intent to reopen the sheet on next show.
+            if didForceClose {
+                print("[AppDelegate] onDidClose -- skipping save, force-close snapshot is authoritative")
+                didForceClose = false
+                return
+            }
             let snap = appState.saveSnapshot()
             print("[AppDelegate] onDidClose -- saving route=\(snap.route) sheet=\(snap.isSheetPresented)")
             lastSession = snap
@@ -61,14 +68,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popoverController.onWillForceClose = { [weak self] in
             guard let self else { print("[AppDelegate] onWillForceClose -- self nil"); return }
-            // Snapshot FIRST with sheet=true so restore will reopen the sheet on next show.
+            // Snapshot FIRST while isSheetPresented is still true.
             let snap = appState.saveSnapshot()
             print("[AppDelegate] onWillForceClose -- saving route=\(snap.route) sheet=\(snap.isSheetPresented)")
             lastSession = snap
+            didForceClose = true
             print("[AppDelegate] session force-saved: route=\(snap.route) sheet=\(snap.isSheetPresented)")
-            // NOW reset the live state so SwiftUI dismisses the sheet cleanly before
-            // forceClose tears down the NSWindow. Without this the binding stays true
-            // and the next open would create a duplicate sheet on top of the live one.
+            // Reset live state so SwiftUI dismisses the sheet before the window is torn
+            // down, preventing a duplicate presentation on the next open.
             print("[AppDelegate] onWillForceClose -- resetting isSheetPresented to false")
             appState.isSheetPresented = false
         }
@@ -80,4 +87,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let overlayGate = MBKOverlayGate()
     private var popoverController: MBKPopoverController!
     private var lastSession: AppState.SessionSnapshot?
+    private var didForceClose = false
 }
