@@ -6,14 +6,14 @@
 //   hosting window. SwiftUI writes true back into any live .sheet(isPresented:)
 //   binding on that window — corrupting isSheetPresented state.
 //
-// WHY panel.level = .floating, NOT addChildWindow:
+// WHY panel.level = popoverWindow.level + 1, NOT addChildWindow:
 //   addChildWindow creates a parent-child relationship that causes two problems:
-//   1. Clicking outside the app boundary dismisses the child panel (child
-//      windows inherit parent activation/deactivation behaviour).
-//   2. hasSheetChildWindow counts childWindows.count and cannot distinguish
-//      a file picker child from an AnchoredSheet child — triggers forceClose.
-//   Setting panel.level = .floating keeps the panel above normal windows and
-//   above the popover without any parent-child relationship.
+//   1. Clicking outside the app boundary dismisses the child panel.
+//   2. hasSheetChildWindow counts childWindows and triggers forceClose.
+//   .floating (level 3) is BELOW the popover's nonactivatingPanel level,
+//   so the panel ends up behind the popover. Reading the popover's actual
+//   level and adding 1 guarantees the panel is always on top regardless of
+//   what level the popover sits at.
 //
 // WHY DEFERRED GATE CLEAR:
 //   The global mouse-down monitor fires on the same click that dismisses the
@@ -36,14 +36,20 @@ public func mbkOpenFilePicker(
         mbkLog("FilePicker", "  window #\(w.windowNumber) styleMask=\(w.styleMask.rawValue) isKey=\(w.isKeyWindow) title=\(title)")
     }
 
+    let popoverWindow = NSApp.windows.first {
+        $0.styleMask.contains(.nonactivatingPanel)
+    }
+    let popoverLevel = popoverWindow?.level ?? .floating
+    mbkLog("FilePicker", "popoverWindow=#\(popoverWindow?.windowNumber ?? -1) level=\(popoverLevel.rawValue)")
+
     let panel = NSOpenPanel()
     panel.canChooseFiles = false
     panel.canChooseDirectories = true
     panel.allowsMultipleSelection = false
     panel.prompt = "Select"
     if let message { panel.message = message }
-    panel.level = .floating
-    mbkLog("FilePicker", "panel created — level=floating")
+    panel.level = NSWindow.Level(rawValue: popoverLevel.rawValue + 1)
+    mbkLog("FilePicker", "panel created — level=\(panel.level.rawValue)")
 
     overlayGate.hasActiveOverlay = true
     mbkLog("FilePicker", "hasActiveOverlay=true — calling panel.begin")
