@@ -1,24 +1,14 @@
 // AppDelegate.swift
 // MenuBarKitExample
 //
-// Thin consumer of MenuBarKit. Owns only:
-//   - AppState (app-specific data)
-//   - MBKOverlayGate (passed into MenuBarKit)
-//   - MBKPopoverController (configured with root view + gate)
-//
-// Nothing about popover lifecycle, monitors, or window management lives here.
-//
 // SESSION RESPAWN — hook split:
-//   onWillShow       → restore route only. Fires before popover.show().
-//   onDidShow        → restore isSheetPresented. Fires after popover.show()
-//                       so the popover window exists when AnchoredSheet
-//                       registers its anchor observer.
-//   onDidClose       → save snapshot with sheet=false. Normal close means
-//                       no sheet was visible — if it were, forceClose fires
-//                       instead. Saving appState.isSheetPresented would
-//                       capture a stale true and cause a respawn loop.
-//   onWillForceClose → save snapshot from live AppState — the ONLY case
-//                       where sheet=true is valid to persist.
+//   onWillShow       → restore route + reset isSheetPresented=false.
+//                       Fires before popover.show() so the view renders clean.
+//   onDidShow        → restore isSheetPresented from snapshot.
+//                       Fires after show() — produces a genuine false→true
+//                       transition that SwiftUI presents the sheet for.
+//   onDidClose       → save snapshot with sheet=false (normal close).
+//   onWillForceClose → save snapshot from live AppState (sheet genuinely open).
 
 import AppKit
 import MenuBarKit
@@ -42,7 +32,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onWillShow = { [weak self] in
             guard let self, let snap = lastSession else { return }
             appState.route = snap.route
-            print("[AppDelegate] route restored: \(snap.route)")
+            // Reset to false before render so SwiftUI doesn't fire a
+            // spurious onChange(true) from stale state. onDidShow sets
+            // the real value after the popover window exists.
+            appState.isSheetPresented = false
+            print("[AppDelegate] route restored: \(snap.route), isSheetPresented reset to false")
         }
 
         popoverController.onDidShow = { [weak self] in
@@ -51,8 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             print("[AppDelegate] isSheetPresented restored: \(snap.isSheetPresented)")
         }
 
-        // Normal close — sheet is never open here (forceClose handles that).
-        // Always save sheet=false to avoid stale-true respawn loop.
+        // Normal close — sheet never open here.
         popoverController.onDidClose = { [weak self] in
             guard let self else { return }
             let snap = AppState.SessionSnapshot(route: appState.route, isSheetPresented: false)
